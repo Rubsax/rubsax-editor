@@ -2,9 +2,17 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Rubsax Editor & Transposer | SaaS de Partituras MuseScore',
+  title: 'RUBSAX TRANSPOSER v1.0 | Transpositor de Partituras',
   description:
-    'Transpositor inteligente de partituras (.mscz, .mscx, MusicXML) com fidelidade absoluta ao MuseScore 3, adaptação entre claves/instrumentos e exportação em PDF.',
+    'Transposição precisa com fidelidade original • Formatos aceitos: .mscz, .mscx, .xml',
+  icons: {
+    icon: [
+      { url: '/icon.png', type: 'image/png' },
+      { url: '/favicon.ico' },
+    ],
+    shortcut: '/icon.png',
+    apple: '/icon.png',
+  },
 };
 
 export default function RootLayout({

@@ -16,10 +16,21 @@ import {
 } from './constants';
 
 export const UNSUPPORTED_FORMAT_MESSAGE =
-  'Formato não suportado. Envie apenas arquivos do MuseScore (.mscz, .mscx) ou MusicXML (.xml).';
+  'Formato não suportado. Envie apenas arquivos do MuseScore (.mscz, .mscx) ou MusicXML (.xml, .mxl).';
 
-export const ALLOWED_EXTENSIONS = ['.mscz', '.mscx', '.xml', '.musicxml'];
+export const ALLOWED_EXTENSIONS = ['.mscz', '.mscx', '.xml', '.musicxml', '.mxl'];
 export const BLOCKED_EXTENSIONS = ['.mus', '.musx', '.sib', '.mid', '.midi', '.enc'];
+
+export type ScoreLayoutViewMode = 'portrait' | 'landscape' | 'full-score';
+
+export interface FloatingTextBox {
+  id: string;
+  text: string;
+  xPercent: number;
+  yPercent: number;
+  fontSize: number;
+  pageIndex: number;
+}
 
 export interface HeaderTextFieldState {
   text: string;
@@ -39,18 +50,30 @@ export interface StaffSummary {
   staffId: string;
   partIndex: number;
   trackName: string;
+  displayName: string;
+  headerInstrumentLabel: string;
   instrumentId: string;
   isVisibleSolo: boolean;
   isPercussion: boolean;
   transposeChromatic: number;
   transposeDiatonic: number;
+  fifthsOffset: number;
+  writtenSemitoneOffset: number;
   clef: ClefType;
+}
+
+export interface ChordOccurrence {
+  occurrenceIndex: number;
+  measureNumber: number;
+  originalSymbol: string;
+  currentSymbol: string;
 }
 
 export interface ScoreAnalysis {
   fileName: string;
-  fileFormat: 'mscz' | 'mscx' | 'xml';
+  fileFormat: 'mscz' | 'mscx' | 'xml' | 'mxl';
   detectedInstrumentId: string;
+  detectedInstrumentName: string;
   detectedGroupId: InstrumentGroupId;
   originalTransposeChromatic: number;
   originalTransposeDiatonic: number;
@@ -82,10 +105,14 @@ export interface ScoreAnalysis {
 export interface ScoreTransformOptions {
   /** Semitone shift applied to Concert Pitch (-12..+12) */
   semitoneShift: number;
-  /** Manual octave shift applied to main solo staff (-2..+2 octaves) */
+  /** Manual octave shift applied to active staff (-2..+2 octaves) */
   octaveShift: number;
-  /** Target instrument ID from the 13 official instruments */
+  /** Target instrument ID (kept from detected file instrument) */
   targetInstrumentId: string;
+  /** Selected staff ID to view/export ('1', '2', '3', etc.) */
+  selectedStaffId: string;
+  /** Layout mode: portrait A4, landscape A4, or full-score stacked staves */
+  viewMode: ScoreLayoutViewMode;
   /** Whether visible chords on a Sib/Mib staff should be transposed to the instrument's written key */
   convertBbEbChordsToWritten: boolean;
   /** Visibility toggles */
@@ -93,17 +120,23 @@ export interface ScoreTransformOptions {
   showLyrics: boolean;
   /** Header text controls */
   headers: ScoreHeadersState;
+  /** User edits to existing chord symbols (maps transposed chord symbol or '#occurrenceIndex' -> new chord symbol) */
+  chordOverrides: Record<string, string>;
+  /** User-created floating text boxes positioned over the score */
+  floatingTexts: FloatingTextBox[];
 }
 
 export interface TransformResult {
   modifiedMscx: string;
   concertTonality: TonalityDefinition;
   writtenTonality: TonalityDefinition;
+  activeStaff: StaffSummary;
   targetInstrument: InstrumentDefinition;
   appliedSemitoneShift: number;
   appliedAutoOctaveSemitones: number;
   appliedManualOctaveSemitones: number;
   previewChords: string[];
+  chordOccurrences: ChordOccurrence[];
 }
 
 export function validateUploadFileName(fileName: string): {
@@ -235,9 +268,6 @@ function cleanMscxTextNode(textEl: Element | null): string {
   return cleaned;
 }
 
-/**
- * Preserva tags de formatação de fonte originais (<font .../>) ao atualizar o texto de um nó <text> no VBox
- */
 function updateMscxTextPreservingFontTags(
   doc: Document,
   textEl: Element,
@@ -298,6 +328,26 @@ function detectPercussionPart(partEl: Element, trackName: string, instrumentId: 
   return false;
 }
 
+function computeStaffOffsetsFromTranspose(transposeChromatic: number): {
+  fifthsOffset: number;
+  writtenSemitoneOffset: number;
+} {
+  const mod = (((-transposeChromatic) % 12) + 12) % 12;
+  if (mod === 2) {
+    // Instrumento em Sib (Bb)
+    return { fifthsOffset: 2, writtenSemitoneOffset: 2 };
+  }
+  if (mod === 9 || mod === 3) {
+    // Instrumento em Mib (Eb)
+    return { fifthsOffset: 3, writtenSemitoneOffset: 9 };
+  }
+  if (mod === 7) {
+    // Instrumento em Fá (F)
+    return { fifthsOffset: 1, writtenSemitoneOffset: 7 };
+  }
+  return { fifthsOffset: 0, writtenSemitoneOffset: 0 };
+}
+
 function detectInitialInstrumentFromPart(
   trackName: string,
   instrumentId: string,
@@ -305,93 +355,185 @@ function detectInitialInstrumentFromPart(
   transposeChromatic: number,
   clef: ClefType
 ): InstrumentDefinition {
-  const combined = `${trackName} ${instrumentId} ${composerHeader}`
+  const primaryTrack = `${trackName} ${instrumentId}`
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
-  // Check Eb group first (-9 or -21 or explicit Eb names)
+  const fallbackAll = `${trackName} ${instrumentId} ${composerHeader}`
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  // 1. Check Eb group (-9 or -21)
   if (
     transposeChromatic === -9 ||
     transposeChromatic === -21 ||
     transposeChromatic === 3 ||
-    combined.includes('sax alto') ||
-    combined.includes('alto sax') ||
-    combined.includes('saxofone alto') ||
-    combined.includes('baritono') ||
-    combined.includes('mib')
+    primaryTrack.includes('alto-sax') ||
+    primaryTrack.includes('saxofone alto') ||
+    primaryTrack.includes('sax alto') ||
+    primaryTrack.includes('baritono')
   ) {
-    if (combined.includes('baritono') && !combined.includes('alto')) {
+    if (primaryTrack.includes('baritono')) {
       return getInstrumentById('baritone-sax');
     }
     return getInstrumentById('alto-sax');
   }
 
-  // Check Bb group (-2 or -14 or explicit Bb names)
+  // 2. Check Bb group (-2 or -14) — prioritize trackName/instrumentId before composerHeader!
   if (
     transposeChromatic === -2 ||
     transposeChromatic === -14 ||
-    combined.includes('clarinete') ||
-    combined.includes('clarinet') ||
-    combined.includes('trompete') ||
-    combined.includes('trumpet') ||
-    combined.includes('sax tenor') ||
-    combined.includes('tenor sax') ||
-    combined.includes('sax soprano') ||
-    combined.includes('soprano sax') ||
-    combined.includes('sib')
+    primaryTrack.includes('clarinet') ||
+    primaryTrack.includes('trumpet') ||
+    primaryTrack.includes('trompete') ||
+    primaryTrack.includes('tenor-sax') ||
+    primaryTrack.includes('saxofone tenor') ||
+    primaryTrack.includes('soprano-sax') ||
+    primaryTrack.includes('saxofone soprano')
   ) {
-    if (combined.includes('trompete') || combined.includes('trumpet')) {
+    if (primaryTrack.includes('clarinet')) return getInstrumentById('clarinet');
+    if (primaryTrack.includes('trumpet') || primaryTrack.includes('trompete'))
       return getInstrumentById('trumpet');
-    }
-    if (combined.includes('tenor') && !combined.includes('clarinete')) {
-      return getInstrumentById('tenor-sax');
-    }
-    if (combined.includes('soprano') && !combined.includes('clarinete')) {
-      return getInstrumentById('soprano-sax');
-    }
+    if (primaryTrack.includes('tenor')) return getInstrumentById('tenor-sax');
+    if (primaryTrack.includes('soprano')) return getInstrumentById('soprano-sax');
     return getInstrumentById('clarinet');
   }
 
-  // Check Bass Clef (Clave de Fá)
+  // 3. Check Bass Clef (Clave de Fá)
   if (
     clef === 'F' ||
-    combined.includes('trombone') ||
-    combined.includes('bombardino') ||
-    combined.includes('euphonium') ||
-    combined.includes('violoncelo') ||
-    combined.includes('violoncello') ||
-    combined.includes('cello') ||
-    combined.includes('clave de fa')
+    primaryTrack.includes('trombone') ||
+    primaryTrack.includes('bombardino') ||
+    primaryTrack.includes('euphonium') ||
+    primaryTrack.includes('violoncelo') ||
+    primaryTrack.includes('cello')
   ) {
-    if (combined.includes('bombardino') || combined.includes('euphonium')) {
+    if (primaryTrack.includes('bombardino') || primaryTrack.includes('euphonium')) {
       return getInstrumentById('euphonium');
     }
-    if (combined.includes('violoncelo') || combined.includes('cello')) {
+    if (primaryTrack.includes('violoncelo') || primaryTrack.includes('cello')) {
       return getInstrumentById('cello');
     }
     return getInstrumentById('trombone');
   }
 
-  // Default to C Treble group
-  if (combined.includes('flauta doce') || combined.includes('recorder')) {
+  // 4. Check C Treble group
+  if (fallbackAll.includes('flauta doce') || fallbackAll.includes('recorder')) {
     return getInstrumentById('recorder');
   }
-  if (combined.includes('flauta') || combined.includes('flute')) {
+  if (fallbackAll.includes('flauta') || fallbackAll.includes('flute')) {
     return getInstrumentById('flute');
   }
-  if (combined.includes('oboe')) {
+  if (fallbackAll.includes('oboe')) {
     return getInstrumentById('oboe');
   }
-  if (combined.includes('teclado') || combined.includes('piano')) {
+  if (fallbackAll.includes('teclado') || fallbackAll.includes('piano')) {
     return getInstrumentById('keyboard');
   }
   return getInstrumentById('violin');
 }
 
+const NOTE_STEP_TO_TPC: Record<string, number> = {
+  C: 14,
+  'C#': 21,
+  'C♯': 21,
+  Cb: 7,
+  'C♭': 7,
+  D: 16,
+  'D#': 23,
+  'D♯': 23,
+  Db: 9,
+  'D♭': 9,
+  E: 18,
+  'E#': 25,
+  'E♯': 25,
+  Eb: 11,
+  'E♭': 11,
+  F: 13,
+  'F#': 20,
+  'F♯': 20,
+  Fb: 6,
+  'F♭': 6,
+  G: 15,
+  'G#': 22,
+  'G♯': 22,
+  Gb: 8,
+  'G♭': 8,
+  A: 17,
+  'A#': 24,
+  'A♯': 24,
+  Ab: 10,
+  'A♭': 10,
+  B: 19,
+  'B#': 26,
+  'B♯': 26,
+  Bb: 12,
+  'B♭': 12,
+};
+
 /**
- * Converte um arquivo MusicXML (.xml / .musicxml) básico em estrutura .mscx compatível caso o usuário suba um .xml direto
+ * Analisa uma cifra digitada pelo usuário (ex: "Dm7(9)", "A7/C#", "Bb9", "C#º")
+ * e converte para <root>, <name> e <base> nativos do MuseScore 3.
  */
+export function parseChordStringToHarmonyParts(rawInput: string): {
+  rootTpc: number;
+  name: string;
+  baseTpc: number | null;
+} | null {
+  const trimmed = (rawInput || '').trim();
+  if (!trimmed) return null;
+
+  let mainPart = trimmed;
+  let baseTpc: number | null = null;
+
+  // Verificar baixo após '/' (ex: A7/C#, C/E, Gm/Bb)
+  const slashMatch = trimmed.match(/^(.*)\/([A-Ga-g][#b♯♭]?)$/);
+  if (slashMatch) {
+    mainPart = slashMatch[1].trim();
+    const bassRaw = slashMatch[2];
+    const normalizedBass = bassRaw.charAt(0).toUpperCase() + bassRaw.slice(1);
+    if (NOTE_STEP_TO_TPC[normalizedBass] !== undefined) {
+      baseTpc = NOTE_STEP_TO_TPC[normalizedBass];
+    }
+  }
+
+  const rootMatch = mainPart.match(/^([A-Ga-g])([#b♯♭]?)(.*)$/);
+  if (!rootMatch) return null;
+
+  const rootNoteKey = rootMatch[1].toUpperCase() + (rootMatch[2] || '');
+  const rootTpc = NOTE_STEP_TO_TPC[rootNoteKey];
+  if (rootTpc === undefined) return null;
+
+  let quality = (rootMatch[3] || '').trim();
+  // Normalizar símbolo de diminuto para o padrão MuseScore
+  if (quality === 'º' || quality === '°') {
+    quality = '0';
+  }
+
+  return {
+    rootTpc,
+    name: quality,
+    baseTpc,
+  };
+}
+
+/**
+ * Formata um elemento <Harmony> em texto legível (ex: "Dm7", "C/E", "C#º")
+ */
+export function formatHarmonyElementSymbol(
+  rootTpc: number,
+  nameStr: string,
+  baseTpc: number | null
+): string {
+  const rootName = tpcToNoteName(rootTpc);
+  const displayQuality = nameStr === '0' ? 'º' : nameStr;
+  const bassSuffix =
+    baseTpc !== null && !Number.isNaN(baseTpc) ? `/${tpcToNoteName(baseTpc)}` : '';
+  return `${rootName}${displayQuality}${bassSuffix}`;
+}
+
 export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
   if (xmlContent.includes('<museScore') || xmlContent.includes('<Score>')) {
     return xmlContent;
@@ -539,9 +681,9 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
           <name>stdNormal</name>
         </StaffType>
       </Staff>
-      <trackName>Violino</trackName>
+      <trackName>Instrumento</trackName>
       <Instrument id="violin">
-        <trackName>Violino</trackName>
+        <trackName>Instrumento</trackName>
         <instrumentId>strings.violin</instrumentId>
         <Channel>
           <program value="40"/>
@@ -562,7 +704,7 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
         </Text>
         <Text>
           <style>Composer</style>
-          <text>Violino, Flauta, Oboé e Teclado</text>
+          <text>Instrumento em Dó</text>
         </Text>
       </VBox>
       ${measuresXml.join('\n      ')}
@@ -572,15 +714,16 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
 }
 
 /**
- * Descompacta um arquivo .mscz (ou lê .mscx / .xml diretamente) e retorna o conteúdo XML .mscx + mapa de arquivos do zip
+ * Descompacta .mscz ou .mxl (ou lê .mscx / .xml diretamente)
  */
 export async function unpackScoreBuffer(
   buffer: ArrayBuffer | Uint8Array | Buffer,
-  fileName: string
+  fileName: string,
+  serverConvertedMscx?: string
 ): Promise<{
   mscxContent: string;
   mscxEntryName: string;
-  fileFormat: 'mscz' | 'mscx' | 'xml';
+  fileFormat: 'mscz' | 'mscx' | 'xml' | 'mxl';
 }> {
   const validation = validateUploadFileName(fileName);
   if (!validation.valid) {
@@ -607,105 +750,74 @@ export async function unpackScoreBuffer(
     };
   }
 
+  if (ext === '.mxl') {
+    if (serverConvertedMscx) {
+      return {
+        mscxContent: serverConvertedMscx,
+        mscxEntryName: 'score.mscx',
+        fileFormat: 'mxl',
+      };
+    }
+    const zip = await JSZip.loadAsync(uint8);
+    const entryNames = Object.keys(zip.files);
+    const xmlEntryName = entryNames.find(
+      (n) =>
+        (n.toLowerCase().endsWith('.xml') || n.toLowerCase().endsWith('.musicxml')) &&
+        !n.toLowerCase().includes('container.xml')
+    );
+    if (!xmlEntryName) {
+      throw new Error('O arquivo .mxl enviado não contém um documento MusicXML válido.');
+    }
+    const xmlText = await zip.file(xmlEntryName)!.async('string');
+    return {
+      mscxContent: convertMusicXmlToMscxIfNeeded(xmlText),
+      mscxEntryName: 'score.mscx',
+      fileFormat: 'mxl',
+    };
+  }
+
   const rawText = new TextDecoder('utf-8').decode(uint8);
   if (ext === '.xml' || ext === '.musicxml') {
-    const converted = convertMusicXmlToMscxIfNeeded(rawText);
-    const base = fileName.replace(/\.(musicxml|xml)$/i, '');
+    const mscxContent = serverConvertedMscx || convertMusicXmlToMscxIfNeeded(rawText);
     return {
-      mscxContent: converted,
-      mscxEntryName: `${base}.mscx`,
+      mscxContent,
+      mscxEntryName: 'score.mscx',
       fileFormat: 'xml',
     };
   }
 
   return {
     mscxContent: rawText,
-    mscxEntryName: fileName.endsWith('.mscx') ? fileName : `${fileName}.mscx`,
+    mscxEntryName: 'score.mscx',
     fileFormat: 'mscx',
   };
 }
 
-/**
- * Analisa profundamente o XML .mscx da partitura para extrair tonalidade de concerto (Piano),
- * tonalidade escrita na pauta, instrumento original, cifras, letras, cabeçalhos e pautas ocultas.
- */
 export function analyzeScoreXml(
   mscxContent: string,
   fileName = 'partitura.mscz',
-  fileFormat: 'mscz' | 'mscx' | 'xml' = 'mscz'
+  fileFormat: 'mscz' | 'mscx' | 'xml' | 'mxl' = 'mscz'
 ): ScoreAnalysis {
   const parser = new DOMParser();
   const doc = parser.parseFromString(mscxContent, 'text/xml');
   const scoreEls = doc.getElementsByTagName('Score');
   const scoreEl = scoreEls.item(0);
   if (!scoreEl) {
-    throw new Error('Estrutura <Score> não encontrada no arquivo do MuseScore.');
+    throw new Error('Estrutura <Score> não encontrada no arquivo.');
   }
 
   const partEls = getDirectChildrenByTag(scoreEl, 'Part');
   const staffBodies = getDirectChildrenByTag(scoreEl, 'Staff');
 
-  const stavesSummary: StaffSummary[] = [];
-  let mainStaffId = '1';
-  let origTransposeChromatic = 0;
-  let origTransposeDiatonic = 0;
-  let origClef: ClefType = 'G';
-  let mainTrackName = '';
-  let mainInstrumentId = '';
-
-  partEls.forEach((partEl, pIdx) => {
-    const trackName = getDirectChildText(partEl, 'trackName');
-    const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
-    const instrId = instrEl
-      ? getDirectChildText(instrEl, 'instrumentId') || instrEl.getAttribute('id') || ''
-      : '';
-    const tChrom = instrEl
-      ? parseInt(getDirectChildText(instrEl, 'transposeChromatic', '0'), 10) || 0
-      : 0;
-    const tDiat = instrEl
-      ? parseInt(getDirectChildText(instrEl, 'transposeDiatonic', '0'), 10) || 0
-      : 0;
-    const isPerc = detectPercussionPart(partEl, trackName, instrId);
-
-    const partStaves = getDirectChildrenByTag(partEl, 'Staff');
-    partStaves.forEach((pStaff, sIdx) => {
-      const sid = pStaff.getAttribute('id') || String(stavesSummary.length + 1);
-      const defClefText = getDirectChildText(pStaff, 'defaultClef', 'G').toUpperCase();
-      const clef: ClefType = defClefText.startsWith('F') ? 'F' : 'G';
-      const isMain = pIdx === 0 && sIdx === 0;
-      if (isMain) {
-        mainStaffId = sid;
-        origTransposeChromatic = tChrom;
-        origTransposeDiatonic = tDiat;
-        origClef = clef;
-        mainTrackName = trackName;
-        mainInstrumentId = instrId;
-      }
-      stavesSummary.push({
-        staffId: sid,
-        partIndex: pIdx,
-        trackName: trackName || `Pauta ${sid}`,
-        instrumentId: instrId,
-        isVisibleSolo: isMain,
-        isPercussion: isPerc,
-        transposeChromatic: tChrom,
-        transposeDiatonic: tDiat,
-        clef,
-      });
-    });
-  });
-
-  const mainStaffBody =
-    staffBodies.find((s) => (s.getAttribute('id') || '1') === mainStaffId) || staffBodies[0];
-
-  // Extract VBox header texts
+  // Primeiro extrair VBox da pauta 1 para conhecer o Composer original
+  const firstStaffBody = staffBodies[0];
   let titleText = '';
   let subtitleText = '';
   let composerText = '';
   let lyricistText = '';
 
-  if (mainStaffBody) {
-    const vboxes = getDirectChildrenByTag(mainStaffBody, 'VBox');
+  if (firstStaffBody) {
+    const vboxes = getDirectChildrenByTag(firstStaffBody, 'VBox');
     for (const vbox of vboxes) {
       const textBlocks = getDirectChildrenByTag(vbox, 'Text');
       for (const tb of textBlocks) {
@@ -725,7 +837,6 @@ export function analyzeScoreXml(
     }
   }
 
-  // Fallback to metaTags if VBox didn't have title
   const metaTags = getDirectChildrenByTag(scoreEl, 'metaTag');
   for (const mt of metaTags) {
     const name = (mt.getAttribute('name') || '').toLowerCase();
@@ -738,10 +849,77 @@ export function analyzeScoreXml(
   }
 
   if (!titleText) {
-    titleText = fileName.replace(/\.(mscz|mscx|xml|musicxml)$/i, '');
+    titleText = fileName.replace(/\.(mscz|mscx|xml|musicxml|mxl)$/i, '');
   }
 
-  // Check first Clef in mainStaffBody if defaultClef wasn't F
+  const stavesSummary: StaffSummary[] = [];
+  let mainStaffId = '1';
+  let origTransposeChromatic = 0;
+  let origTransposeDiatonic = 0;
+  let origClef: ClefType = 'G';
+  let mainTrackName = '';
+  let mainInstrumentId = '';
+
+  partEls.forEach((partEl, pIdx) => {
+    const trackName = getDirectChildText(partEl, 'trackName');
+    const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
+    const longName = instrEl ? cleanMscxTextNode(getFirstDirectChildByTag(instrEl, 'longName')) : '';
+    const instrTrackName = instrEl ? getDirectChildText(instrEl, 'trackName') : '';
+    const instrId = instrEl
+      ? getDirectChildText(instrEl, 'instrumentId') || instrEl.getAttribute('id') || ''
+      : '';
+    const tChrom = instrEl
+      ? parseInt(getDirectChildText(instrEl, 'transposeChromatic', '0'), 10) || 0
+      : 0;
+    const tDiat = instrEl
+      ? parseInt(getDirectChildText(instrEl, 'transposeDiatonic', '0'), 10) || 0
+      : 0;
+    const isPerc = detectPercussionPart(partEl, trackName || instrTrackName, instrId);
+    const { fifthsOffset, writtenSemitoneOffset } = computeStaffOffsetsFromTranspose(tChrom);
+
+    const partStaves = getDirectChildrenByTag(partEl, 'Staff');
+    partStaves.forEach((pStaff, sIdx) => {
+      const sid = pStaff.getAttribute('id') || String(stavesSummary.length + 1);
+      const defClefText = getDirectChildText(pStaff, 'defaultClef', 'G').toUpperCase();
+      const clef: ClefType = defClefText.startsWith('F') ? 'F' : 'G';
+      const isMain = pIdx === 0 && sIdx === 0;
+
+      const rawDisplayName =
+        trackName || instrTrackName || longName || (isPerc ? 'Bateria' : `Pauta ${sid}`);
+      const cleanName = rawDisplayName.replace(/\s+em\s+B♭/i, ' Sib').replace(/\s+em\s+E♭/i, ' Mib');
+
+      if (isMain) {
+        mainStaffId = sid;
+        origTransposeChromatic = tChrom;
+        origTransposeDiatonic = tDiat;
+        origClef = clef;
+        mainTrackName = rawDisplayName;
+        mainInstrumentId = instrId;
+      }
+
+      stavesSummary.push({
+        staffId: sid,
+        partIndex: pIdx,
+        trackName: rawDisplayName,
+        displayName: cleanName,
+        headerInstrumentLabel: isMain
+          ? composerText || rawDisplayName
+          : rawDisplayName,
+        instrumentId: instrId,
+        isVisibleSolo: isMain,
+        isPercussion: isPerc,
+        transposeChromatic: tChrom,
+        transposeDiatonic: tDiat,
+        fifthsOffset,
+        writtenSemitoneOffset,
+        clef,
+      });
+    });
+  });
+
+  const mainStaffBody =
+    staffBodies.find((s) => (s.getAttribute('id') || '1') === mainStaffId) || staffBodies[0];
+
   if (mainStaffBody) {
     const clefEls = mainStaffBody.getElementsByTagName('Clef');
     if (clefEls.length > 0) {
@@ -764,7 +942,14 @@ export function analyzeScoreXml(
     origClef
   );
 
-  // Extract KeySig from mainStaffBody
+  // Atualizar displayName da Pauta 1 com nome amigável caso trackName estivesse genérico
+  if (stavesSummary[0]) {
+    if (!stavesSummary[0].trackName || stavesSummary[0].trackName === 'Pauta 1') {
+      stavesSummary[0].trackName = detectedInstrument.name;
+      stavesSummary[0].displayName = detectedInstrument.name;
+    }
+  }
+
   let writtenKeyFifths = 0;
   if (mainStaffBody) {
     const keySigs = mainStaffBody.getElementsByTagName('KeySig');
@@ -774,16 +959,19 @@ export function analyzeScoreXml(
     }
   }
 
-  // Determine Concert Key Fifths (Tom Base para Piano / Dó)
-  let concertKeyFifths = normalizeKeySigFifths(
-    writtenKeyFifths - detectedInstrument.fifthsOffset
-  );
+  const mainFifthsOffset =
+    stavesSummary[0]?.fifthsOffset ?? detectedInstrument.fifthsOffset;
+  let concertKeyFifths = normalizeKeySigFifths(writtenKeyFifths - mainFifthsOffset);
 
-  // Also cross-check with Staff 2 (Piano) if present and non-transposing
   if (staffBodies.length > 1) {
     const secondStaff = staffBodies[1];
     const secondSummary = stavesSummary[1];
-    if (secondStaff && secondSummary && !secondSummary.isPercussion && secondSummary.transposeChromatic === 0) {
+    if (
+      secondStaff &&
+      secondSummary &&
+      !secondSummary.isPercussion &&
+      secondSummary.transposeChromatic === 0
+    ) {
       const ks2 = secondStaff.getElementsByTagName('KeySig');
       if (ks2.length > 0) {
         const acc2 = parseInt(getDirectChildText(ks2.item(0)!, 'accidental', '0'), 10);
@@ -797,7 +985,6 @@ export function analyzeScoreXml(
   const concertTonality = getTonalityByFifths(concertKeyFifths);
   const writtenTonality = getTonalityByFifths(writtenKeyFifths);
 
-  // Count measures, notes, chords, lyrics, and median pitch on mainStaffBody
   let measureCount = 0;
   let noteCount = 0;
   let chordCount = 0;
@@ -826,10 +1013,9 @@ export function analyzeScoreXml(
       const rootTpc = parseInt(getDirectChildText(hEl, 'root', '14'), 10);
       const nameStr = getDirectChildText(hEl, 'name', '');
       const baseStr = getDirectChildText(hEl, 'base', '');
-      if (!Number.isNaN(rootTpc) && sampleChords.length < 8) {
-        const rootName = tpcToNoteName(rootTpc);
-        const bassName = baseStr ? `/${tpcToNoteName(parseInt(baseStr, 10))}` : '';
-        const fullChord = `${rootName}${nameStr}${bassName}`;
+      const baseTpc = baseStr ? parseInt(baseStr, 10) : null;
+      if (!Number.isNaN(rootTpc)) {
+        const fullChord = formatHarmonyElementSymbol(rootTpc, nameStr, baseTpc);
         if (!sampleChords.includes(fullChord)) {
           sampleChords.push(fullChord);
         }
@@ -847,17 +1033,20 @@ export function analyzeScoreXml(
   }
 
   const isBbOrEb =
-    detectedInstrument.groupId === 'BB_TREBLE' || detectedInstrument.groupId === 'EB_TREBLE';
+    detectedInstrument.groupId === 'BB_TREBLE' ||
+    detectedInstrument.groupId === 'EB_TREBLE' ||
+    mainFifthsOffset !== 0;
 
   const defaultLyricistText =
     lyricistText || `Tom para Piano:\n${concertTonality.majorName}`;
   const defaultComposerText =
-    composerText || detectedInstrument.headerInstrumentText;
+    composerText || stavesSummary[0]?.headerInstrumentLabel || detectedInstrument.headerInstrumentText;
 
   return {
     fileName,
     fileFormat,
     detectedInstrumentId: detectedInstrument.id,
+    detectedInstrumentName: stavesSummary[0]?.displayName || detectedInstrument.name,
     detectedGroupId: detectedInstrument.groupId,
     originalTransposeChromatic: origTransposeChromatic,
     originalTransposeDiatonic: origTransposeDiatonic,
@@ -906,53 +1095,6 @@ export function analyzeScoreXml(
   };
 }
 
-/**
- * Calcula o deslocamento automático de oitava (em múltiplos de 12 semitons)
- * para proteger a tessitura ao converter entre grupos (ex: Clave de Sol <-> Clave de Fá)
- */
-function computeAutoTessituraOctaveSemitones(
-  originalMedianConcertPitch: number,
-  semitoneShift: number,
-  targetInstrument: InstrumentDefinition
-): number {
-  const shiftedConcertMedian = originalMedianConcertPitch + semitoneShift;
-  const rawWrittenMedian = shiftedConcertMedian - targetInstrument.transposeChromatic;
-  const ideal = targetInstrument.idealMedianWrittenPitch;
-
-  if (targetInstrument.clef === 'F') {
-    // Na Clave de Fá, a região central ideal é em torno de 46..59 (Sib2 a Si3, centro ~53 Fá3)
-    let bestShift = 0;
-    let bestDist = Math.abs(rawWrittenMedian - ideal);
-    for (const candidate of [-24, -12, 0, 12, 24]) {
-      const dist = Math.abs(rawWrittenMedian + candidate - ideal);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestShift = candidate;
-      }
-    }
-    return bestShift;
-  }
-
-  // Na Clave de Sol, se a mediana escrita cair muito grave (< 57, Lá3) ou muito aguda (> 81, Lá5), ajusta 1 oitava
-  if (rawWrittenMedian < 57) {
-    return 12;
-  }
-  if (rawWrittenMedian > 81) {
-    return -12;
-  }
-  return 0;
-}
-
-/**
- * Aplica matematicamente todas as transformações no XML .mscx preservando a diagramação original do MuseScore 3:
- * - Transposição cromática com acidentes estritamente simples (# ou b) fiéis à armadura de clave
- * - Transposição simultânea das pautas ocultas de Piano e Baixo (ignorando Bateria/Percussão)
- * - Adaptação de clave (Sol <-> Fá) e proteção automática de tessitura + controle manual de oitava
- * - Mute obrigatório (<play>0</play>) nas cifras da pauta principal e unmute nas pautas ocultas
- * - Conversão opcional das cifras visíveis para instrumentos em Sib (+2 semitons) e Mib (-3/+9 semitons)
- * - Ocultação/exibição de cifras, letras e cabeçalhos (mantendo fonte e tamanho originais travados)
- * - Injeção imutável da marca d'água "Rubsax Partituras" no rodapé
- */
 export function transformScoreXml(
   originalMscxContent: string,
   analysis: ScoreAnalysis,
@@ -966,35 +1108,81 @@ export function transformScoreXml(
     throw new Error('Elemento <Score> inválido.');
   }
 
-  const targetInstrument = getInstrumentById(options.targetInstrumentId);
+  const targetInstrument = getInstrumentById(
+    options.targetInstrumentId || analysis.detectedInstrumentId
+  );
   const semitoneShift = options.semitoneShift;
+  const viewMode: ScoreLayoutViewMode = options.viewMode || 'portrait';
+  const isFullScore = viewMode === 'full-score';
 
-  // 1. Calcular nova Tonalidade Base (Piano / Dó) e Tonalidade Escrita na Pauta Principal
+  // Identificar pauta ativa selecionada pelo usuário (padrão: Pauta 1)
+  const activeStaff =
+    analysis.staves.find((s) => s.staffId === options.selectedStaffId) ||
+    analysis.staves[0] || {
+      staffId: '1',
+      partIndex: 0,
+      trackName: targetInstrument.name,
+      displayName: targetInstrument.name,
+      headerInstrumentLabel: targetInstrument.headerInstrumentText,
+      instrumentId: targetInstrument.musescoreInstrumentId,
+      isVisibleSolo: true,
+      isPercussion: false,
+      transposeChromatic: analysis.originalTransposeChromatic,
+      transposeDiatonic: analysis.originalTransposeDiatonic,
+      fifthsOffset: targetInstrument.fifthsOffset,
+      writtenSemitoneOffset: targetInstrument.writtenSemitoneOffset,
+      clef: analysis.originalClef,
+    };
+
+  // 1. Calcular nova Tonalidade Base (Piano / Dó) e Tonalidade Escrita na Pauta Ativa
   const newConcertPc =
     ((analysis.originalConcertPitchClass + semitoneShift) % 12 + 12) % 12;
   const concertTonality = getTonalityByPitchClass(newConcertPc);
   const newConcertKeyFifths = concertTonality.fifths;
 
-  const newWrittenPc =
-    ((newConcertPc + targetInstrument.writtenSemitoneOffset) % 12 + 12) % 12;
-  const writtenTonality = getTonalityByPitchClass(newWrittenPc);
-  const newWrittenKeyFifths = writtenTonality.fifths;
+  const activeWrittenPc =
+    ((newConcertPc + activeStaff.writtenSemitoneOffset) % 12 + 12) % 12;
+  const writtenTonality = getTonalityByPitchClass(activeWrittenPc);
 
-  // 2. Garantir layoutMode = page (para renderização limpa e fiel de páginas no SVG e PDF)
+  // 2. Garantir layoutMode paginado (removendo line/system para renderização limpa)
   removeDirectChildrenByTag(scoreEl, 'layoutMode');
 
-  // 3. Blindar Marca d'Água Obrigatória "Rubsax Partituras" no <Style> e <metaTag name="copyright">
+  // 3. Configurar <Style>: Orientação (Vertical/Retrato vs Horizontal/Paisagem), Nomes na Grade e Marca d'Água
   let styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
   if (!styleEl) {
     styleEl = doc.createElement('Style');
     scoreEl.insertBefore(styleEl, scoreEl.firstChild);
   }
+
+  if (viewMode === 'landscape') {
+    setOrCreateDirectChildText(doc, styleEl, 'pageWidth', '11.69');
+    setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '8.27');
+    setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '10.50');
+  } else {
+    setOrCreateDirectChildText(doc, styleEl, 'pageWidth', '8.27');
+    setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '11.69');
+    setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '7.09');
+  }
+
+  if (isFullScore) {
+    setOrCreateDirectChildText(doc, styleEl, 'hideInstrumentNameIfOneInstrument', '0');
+  }
+
   setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
   setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
   setOrCreateDirectChildText(doc, styleEl, 'oddFooterR', 'Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'evenFooterR', 'Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'oddFooterC', '© Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'evenFooterC', '© Rubsax Partituras');
+
+  const spatiumMm =
+    parseFloat(getDirectChildText(styleEl, 'Spatium', '1.75')) || 1.75;
+  const pageWidthIn =
+    parseFloat(getDirectChildText(styleEl, 'pageWidth', viewMode === 'landscape' ? '11.69' : '8.27')) || 8.27;
+  const pageHeightIn =
+    parseFloat(getDirectChildText(styleEl, 'pageHeight', viewMode === 'landscape' ? '8.27' : '11.69')) || 11.69;
+  const pageWidthSp = (pageWidthIn * 25.4) / spatiumMm;
+  const pageHeightSp = (pageHeightIn * 25.4) / spatiumMm;
 
   const metaTags = getDirectChildrenByTag(scoreEl, 'metaTag');
   let foundCopyrightMeta = false;
@@ -1012,118 +1200,102 @@ export function transformScoreXml(
     scoreEl.appendChild(cMeta);
   }
 
-  // 4. Atualizar <Part> principal (Instrumento, Clave, Transposição) e ocultar pautas secundárias
+  // 4. Configurar visibilidade dos <Part>s conforme a pauta selecionada ou Grade Completa
   const partEls = getDirectChildrenByTag(scoreEl, 'Part');
-  const mainStaffId = analysis.staves[0]?.staffId || '1';
-
   partEls.forEach((partEl, pIdx) => {
-    if (pIdx === 0) {
-      // Pauta principal sempre visível
+    const partStaffEls = getDirectChildrenByTag(partEl, 'Staff');
+    const partStaffIds = partStaffEls.map(
+      (ps, i) => ps.getAttribute('id') || String(pIdx + i + 1)
+    );
+    const containsActiveStaff = partStaffIds.includes(activeStaff.staffId);
+
+    if (isFullScore) {
       removeDirectChildrenByTag(partEl, 'show');
-      setOrCreateDirectChildText(doc, partEl, 'trackName', targetInstrument.name);
-
-      const pStaff = getFirstDirectChildByTag(partEl, 'Staff');
-      if (pStaff) {
-        removeDirectChildrenByTag(pStaff, 'invisible');
-        if (targetInstrument.clef === 'F') {
-          setOrCreateDirectChildText(doc, pStaff, 'defaultClef', 'F');
-        } else {
-          removeDirectChildrenByTag(pStaff, 'defaultClef');
-        }
-      }
-
+      partStaffEls.forEach((ps) => {
+        removeDirectChildrenByTag(ps, 'invisible');
+        removeDirectChildrenByTag(ps, 'visible');
+      });
+      // Garantir que <longName> exista no <Instrument> para exibir o nome à esquerda na Grade Completa
       const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
-      if (instrEl) {
-        setOrCreateDirectChildText(doc, instrEl, 'trackName', targetInstrument.name);
-        setOrCreateDirectChildText(
-          doc,
-          instrEl,
-          'instrumentId',
-          targetInstrument.musescoreInstrumentId
-        );
-
-        if (targetInstrument.transposeChromatic !== 0) {
-          setOrCreateDirectChildText(
-            doc,
-            instrEl,
-            'transposeDiatonic',
-            String(targetInstrument.transposeDiatonic),
-            'instrumentId'
-          );
-          setOrCreateDirectChildText(
-            doc,
-            instrEl,
-            'transposeChromatic',
-            String(targetInstrument.transposeChromatic),
-            'instrumentId'
-          );
-        } else {
-          removeDirectChildrenByTag(instrEl, 'transposeDiatonic');
-          removeDirectChildrenByTag(instrEl, 'transposeChromatic');
-        }
-
-        // Atualizar programa MIDI do canal principal
-        const channelEls = getDirectChildrenByTag(instrEl, 'Channel');
-        for (const chEl of channelEls) {
-          if ((chEl.getAttribute('name') || '') !== 'harmony') {
-            const progEl = getFirstDirectChildByTag(chEl, 'program');
-            if (progEl) {
-              progEl.setAttribute('value', String(targetInstrument.midiProgram));
-            }
-          }
-        }
+      const tName = getDirectChildText(partEl, 'trackName');
+      if (instrEl && tName && !getFirstDirectChildByTag(instrEl, 'longName')) {
+        setOrCreateDirectChildText(doc, instrEl, 'longName', tName, 'trackName');
       }
+    } else if (containsActiveStaff) {
+      removeDirectChildrenByTag(partEl, 'show');
+      partStaffEls.forEach((ps) => {
+        const psId = ps.getAttribute('id') || '';
+        if (psId === activeStaff.staffId || partStaffEls.length === 1) {
+          removeDirectChildrenByTag(ps, 'invisible');
+          removeDirectChildrenByTag(ps, 'visible');
+        } else {
+          setOrCreateDirectChildText(doc, ps, 'invisible', '1');
+        }
+      });
     } else {
-      // Pautas ocultas de acompanhamento (Piano, Baixo, Bateria): sempre ocultas na tela e no PDF
       setOrCreateDirectChildText(doc, partEl, 'show', '0');
     }
   });
 
-  // 5. Calcular ajuste automático de tessitura + oitava manual para a pauta principal
-  const autoTessituraOctaveSemitones = computeAutoTessituraOctaveSemitones(
-    analysis.originalMedianConcertPitch,
-    semitoneShift,
-    targetInstrument
-  );
-  const manualOctaveSemitones = options.octaveShift * 12;
-  const totalMainStaffPitchDelta =
-    semitoneShift + autoTessituraOctaveSemitones + manualOctaveSemitones;
-
-  // 6. Processar cada <Staff> dentro de <Score>
+  // 5. Garantir que o <VBox> de cabeçalho esteja na pauta visível ativa
   const staffBodies = getDirectChildrenByTag(scoreEl, 'Staff');
+  const firstStaffBody = staffBodies[0];
+  const activeStaffBody =
+    staffBodies.find((s) => (s.getAttribute('id') || '1') === activeStaff.staffId) ||
+    firstStaffBody;
+
+  const targetVBoxOwner = isFullScore ? firstStaffBody : activeStaffBody;
+  if (firstStaffBody && targetVBoxOwner && targetVBoxOwner !== firstStaffBody) {
+    const origVBoxes = getDirectChildrenByTag(firstStaffBody, 'VBox');
+    const targetVBoxes = getDirectChildrenByTag(targetVBoxOwner, 'VBox');
+    if (origVBoxes.length > 0 && targetVBoxes.length === 0) {
+      const clonedVBox = origVBoxes[0].cloneNode(true) as Element;
+      const firstMeasure = getFirstDirectChildByTag(targetVBoxOwner, 'Measure');
+      if (firstMeasure) {
+        targetVBoxOwner.insertBefore(clonedVBox, firstMeasure);
+      } else {
+        targetVBoxOwner.appendChild(clonedVBox);
+      }
+    }
+  }
+
+  // Atualizar cabeçalhos e injetar Caixas de Texto Flutuantes no VBox da pauta visível
+  if (targetVBoxOwner) {
+    const headerLabelForActiveMode = isFullScore
+      ? 'Grade Completa'
+      : activeStaff.headerInstrumentLabel;
+
+    updateStaffHeadersAndFloatingTexts(
+      doc,
+      targetVBoxOwner,
+      options.headers,
+      concertTonality,
+      headerLabelForActiveMode,
+      options.floatingTexts || [],
+      pageWidthSp,
+      pageHeightSp
+    );
+  }
+
+  // 6. Processar cada <Staff> dentro de <Score> (Transposição, Oitava, Cifras e Letras)
+  const manualOctaveSemitones = options.octaveShift * 12;
   const previewChords: string[] = [];
+  const chordOccurrences: ChordOccurrence[] = [];
 
   staffBodies.forEach((staffBody, sIdx) => {
     const sid = staffBody.getAttribute('id') || String(sIdx + 1);
     const staffMeta =
       analysis.staves.find((st) => st.staffId === sid) || analysis.staves[sIdx];
-    const isMainSolo = sid === mainStaffId || sIdx === 0;
+    const isThisStaffActive = isFullScore || sid === activeStaff.staffId;
     const isPercussion = staffMeta ? staffMeta.isPercussion : false;
+    const staffFifthsOffset = staffMeta ? staffMeta.fifthsOffset : 0;
+    const staffWrittenSemitoneOffset = staffMeta ? staffMeta.writtenSemitoneOffset : 0;
+    const staffTransposeChromatic = staffMeta ? staffMeta.transposeChromatic : 0;
 
-    if (!isMainSolo) {
-      // Garantir que pautas secundárias permaneçam ocultas visualmente
-      setOrCreateDirectChildText(doc, staffBody, 'visible', '0', 'Measure');
-    } else {
+    if (isThisStaffActive) {
       removeDirectChildrenByTag(staffBody, 'visible');
-    }
-
-    // Se for pauta principal, processar <VBox> (Cabeçalhos) e <Clef>
-    if (isMainSolo) {
-      updateMainStaffHeaders(
-        doc,
-        staffBody,
-        options.headers,
-        concertTonality,
-        targetInstrument
-      );
-
-      // Atualizar ou injetar <Clef> na pauta principal quando mudar entre Clave de Sol (G) e Clave de Fá (F)
-      const clefNodes = staffBody.getElementsByTagName('Clef');
-      for (let i = 0; i < clefNodes.length; i++) {
-        const cNode = clefNodes.item(i)!;
-        setOrCreateDirectChildText(doc, cNode, 'concertClefType', targetInstrument.clef);
-        setOrCreateDirectChildText(doc, cNode, 'transposingClefType', targetInstrument.clef);
-      }
+    } else {
+      setOrCreateDirectChildText(doc, staffBody, 'visible', '0', 'Measure');
     }
 
     // Ignorar transposição de alturas e armadura em pautas de Percussão / Bateria
@@ -1135,14 +1307,18 @@ export function transformScoreXml(
       return;
     }
 
-    // Determinar nova armadura para esta pauta
-    const targetStaffKeyFifths = isMainSolo ? newWrittenKeyFifths : newConcertKeyFifths;
-    const origStaffKeyFifths = isMainSolo
-      ? analysis.originalWrittenKeyFifths
-      : analysis.originalConcertKeyFifths;
+    // Calcular nova armadura escrita para esta pauta específica
+    const staffWrittenPc =
+      ((newConcertPc + staffWrittenSemitoneOffset) % 12 + 12) % 12;
+    const staffWrittenTonality = getTonalityByPitchClass(staffWrittenPc);
+    const targetStaffKeyFifths = staffWrittenTonality.fifths;
+
+    const origStaffKeyFifths = normalizeKeySigFifths(
+      analysis.originalConcertKeyFifths + staffFifthsOffset
+    );
     const fifthsDeltaForModulations = targetStaffKeyFifths - origStaffKeyFifths;
 
-    // 6a. Atualizar todas as armaduras de clave (<KeySig>) da pauta
+    // 6a. Atualizar armaduras de clave (<KeySig>)
     const keySigNodes = staffBody.getElementsByTagName('KeySig');
     for (let i = 0; i < keySigNodes.length; i++) {
       const ksNode = keySigNodes.item(i)!;
@@ -1156,7 +1332,10 @@ export function transformScoreXml(
 
     // 6b. Transpor todas as notas (<Note>) da pauta com regra estrita de acidentes simples (# ou b)
     const noteNodes = staffBody.getElementsByTagName('Note');
-    const staffPitchDelta = isMainSolo ? totalMainStaffPitchDelta : semitoneShift;
+    const applyOctaveToThisStaff =
+      sid === activeStaff.staffId || (isFullScore && sIdx === 0);
+    const staffPitchDelta =
+      semitoneShift + (applyOctaveToThisStaff ? manualOctaveSemitones : 0);
 
     for (let i = 0; i < noteNodes.length; i++) {
       const noteNode = noteNodes.item(i)!;
@@ -1179,12 +1358,12 @@ export function transformScoreXml(
       setOrCreateDirectChildText(doc, noteNode, 'pitch', String(newConcertPitch));
       setOrCreateDirectChildText(doc, noteNode, 'tpc', String(newConcertTpc));
 
-      if (isMainSolo && targetInstrument.transposeChromatic !== 0) {
-        const newWrittenPitch = newConcertPitch - targetInstrument.transposeChromatic;
+      if (staffTransposeChromatic !== 0) {
+        const newWrittenPitch = newConcertPitch - staffTransposeChromatic;
         const newWrittenNotePc = ((newWrittenPitch % 12) + 12) % 12;
         const newWrittenTpc = pitchClassToSimpleTpc(
           newWrittenNotePc,
-          newWrittenKeyFifths,
+          targetStaffKeyFifths,
           preferFlat
         );
         setOrCreateDirectChildText(doc, noteNode, 'tpc2', String(newWrittenTpc));
@@ -1192,88 +1371,129 @@ export function transformScoreXml(
         removeDirectChildrenByTag(noteNode, 'tpc2');
       }
 
-      // Remover <Accidental> fixo antigo para que o MuseScore 3 gere os acidentes ocorrentes (#, b ou bequadro)
-      // estritamente a partir do novo <tpc>/<tpc2> simples e da nova <KeySig>
       removeDirectChildrenByTag(noteNode, 'Accidental');
     }
 
-    // 6c. Processar Cifras (<Harmony>)
-    const harmonyNodes = Array.from(staffBody.getElementsByTagName('Harmony'));
-    const isTransposingTarget =
-      targetInstrument.groupId === 'BB_TREBLE' || targetInstrument.groupId === 'EB_TREBLE';
+    // 6c. Processar Cifras (<Harmony>) e Edições de Cifras Existentes
+    const measures = getDirectChildrenByTag(staffBody, 'Measure');
+    const isTransposingStaff = staffWrittenSemitoneOffset !== 0;
     const shouldTransposeVisibleChordsToInstrument =
-      isMainSolo && isTransposingTarget && options.convertBbEbChordsToWritten;
+      isTransposingStaff && options.convertBbEbChordsToWritten;
 
     const chordSemitoneDelta =
       semitoneShift +
-      (shouldTransposeVisibleChordsToInstrument
-        ? targetInstrument.writtenSemitoneOffset
-        : 0);
+      (shouldTransposeVisibleChordsToInstrument ? staffWrittenSemitoneOffset : 0);
     const chordKeyFifths = shouldTransposeVisibleChordsToInstrument
-      ? newWrittenKeyFifths
+      ? targetStaffKeyFifths
       : newConcertKeyFifths;
 
-    for (const hNode of harmonyNodes) {
-      if (isMainSolo && !options.showChords) {
-        if (hNode.parentNode) {
-          hNode.parentNode.removeChild(hNode);
-        }
-        continue;
-      }
-
-      const rootText = getDirectChildText(hNode, 'root');
-      if (rootText) {
-        const origRootTpc = parseInt(rootText, 10);
-        if (!Number.isNaN(origRootTpc)) {
-          const origRootPc = tpcToPitchClass(origRootTpc);
-          const newRootPc = ((origRootPc + chordSemitoneDelta) % 12 + 12) % 12;
-          const newRootTpc = pitchClassToSimpleTpc(
-            newRootPc,
-            chordKeyFifths,
-            origRootTpc <= 12
-          );
-          setOrCreateDirectChildText(doc, hNode, 'root', String(newRootTpc));
-
-          // Transpor baixo da cifra (slash chord <base>, ex: C/E -> D/F#) se existir
-          const baseText = getDirectChildText(hNode, 'base');
-          let bassSuffix = '';
-          if (baseText) {
-            const origBaseTpc = parseInt(baseText, 10);
-            if (!Number.isNaN(origBaseTpc)) {
-              const origBasePc = tpcToPitchClass(origBaseTpc);
-              const newBasePc = ((origBasePc + chordSemitoneDelta) % 12 + 12) % 12;
-              const newBaseTpc = pitchClassToSimpleTpc(
-                newBasePc,
-                chordKeyFifths,
-                origBaseTpc <= 12
-              );
-              setOrCreateDirectChildText(doc, hNode, 'base', String(newBaseTpc));
-              bassSuffix = `/${tpcToNoteName(newBaseTpc)}`;
-            }
+    let staffHarmonyIdx = 0;
+    measures.forEach((mEl, mIdx) => {
+      const mHarmonies = Array.from(mEl.getElementsByTagName('Harmony'));
+      for (const hNode of mHarmonies) {
+        if (!options.showChords && isThisStaffActive) {
+          if (hNode.parentNode) {
+            hNode.parentNode.removeChild(hNode);
           }
+          continue;
+        }
 
-          if (isMainSolo && previewChords.length < 8) {
-            const chordQuality = getDirectChildText(hNode, 'name', '');
-            const label = `${tpcToNoteName(newRootTpc)}${chordQuality}${bassSuffix}`;
-            if (!previewChords.includes(label)) {
-              previewChords.push(label);
+        const rootText = getDirectChildText(hNode, 'root');
+        if (rootText) {
+          const origRootTpc = parseInt(rootText, 10);
+          if (!Number.isNaN(origRootTpc)) {
+            const origRootPc = tpcToPitchClass(origRootTpc);
+            const newRootPc = ((origRootPc + chordSemitoneDelta) % 12 + 12) % 12;
+            let finalRootTpc = pitchClassToSimpleTpc(
+              newRootPc,
+              chordKeyFifths,
+              origRootTpc <= 12
+            );
+
+            let finalName = getDirectChildText(hNode, 'name', '');
+            const baseText = getDirectChildText(hNode, 'base');
+            let finalBaseTpc: number | null = null;
+
+            if (baseText) {
+              const origBaseTpc = parseInt(baseText, 10);
+              if (!Number.isNaN(origBaseTpc)) {
+                const origBasePc = tpcToPitchClass(origBaseTpc);
+                const newBasePc = ((origBasePc + chordSemitoneDelta) % 12 + 12) % 12;
+                finalBaseTpc = pitchClassToSimpleTpc(
+                  newBasePc,
+                  chordKeyFifths,
+                  origBaseTpc <= 12
+                );
+              }
             }
+
+            const autoTransposedSymbol = formatHarmonyElementSymbol(
+              finalRootTpc,
+              finalName,
+              finalBaseTpc
+            );
+
+            // Verificar se o usuário editou esta cifra (por ocorrência #idx ou pelo nome do acorde)
+            const overrideByOccurrence =
+              options.chordOverrides?.[`#${staffHarmonyIdx}`];
+            const overrideBySymbol =
+              options.chordOverrides?.[autoTransposedSymbol];
+            const chosenOverride = overrideByOccurrence || overrideBySymbol;
+
+            if (chosenOverride) {
+              const parsed = parseChordStringToHarmonyParts(chosenOverride);
+              if (parsed) {
+                finalRootTpc = parsed.rootTpc;
+                finalName = parsed.name;
+                finalBaseTpc = parsed.baseTpc;
+              }
+            }
+
+            setOrCreateDirectChildText(doc, hNode, 'root', String(finalRootTpc));
+            if (finalName) {
+              setOrCreateDirectChildText(doc, hNode, 'name', finalName);
+            } else {
+              removeDirectChildrenByTag(hNode, 'name');
+            }
+
+            if (finalBaseTpc !== null) {
+              setOrCreateDirectChildText(doc, hNode, 'base', String(finalBaseTpc));
+            } else {
+              removeDirectChildrenByTag(hNode, 'base');
+            }
+
+            const finalDisplaySymbol = formatHarmonyElementSymbol(
+              finalRootTpc,
+              finalName,
+              finalBaseTpc
+            );
+
+            if (sid === activeStaff.staffId) {
+              if (!previewChords.includes(finalDisplaySymbol)) {
+                previewChords.push(finalDisplaySymbol);
+              }
+              chordOccurrences.push({
+                occurrenceIndex: staffHarmonyIdx,
+                measureNumber: mIdx + 1,
+                originalSymbol: autoTransposedSymbol,
+                currentSymbol: finalDisplaySymbol,
+              });
+            }
+
+            staffHarmonyIdx++;
           }
         }
-      }
 
-      // Regra de Mute de Cifras:
-      // Na pauta principal do instrumento solo: SEMPRE mutadas (<play>0</play>)
-      // Nas pautas ocultas (Piano, Baixo, Bateria): SEMPRE desmutadas
-      if (isMainSolo) {
-        setOrCreateDirectChildText(doc, hNode, 'play', '0');
-      } else {
-        removeDirectChildrenByTag(hNode, 'play');
+        if (sIdx === 0) {
+          setOrCreateDirectChildText(doc, hNode, 'play', '0');
+        } else {
+          removeDirectChildrenByTag(hNode, 'play');
+        }
       }
-    }
+    });
 
-    // 6d. Processar Letras (<Lyrics>) na pauta principal
-    if (isMainSolo && !options.showLyrics) {
+    // 6d. Processar Letras (<Lyrics>)
+    if (!options.showLyrics && isThisStaffActive) {
       const lyricNodes = Array.from(staffBody.getElementsByTagName('Lyrics'));
       for (const lNode of lyricNodes) {
         if (lNode.parentNode) {
@@ -1290,23 +1510,28 @@ export function transformScoreXml(
     modifiedMscx,
     concertTonality,
     writtenTonality,
+    activeStaff,
     targetInstrument,
     appliedSemitoneShift: semitoneShift,
-    appliedAutoOctaveSemitones: autoTessituraOctaveSemitones,
+    appliedAutoOctaveSemitones: 0,
     appliedManualOctaveSemitones: manualOctaveSemitones,
     previewChords,
+    chordOccurrences,
   };
 }
 
-function updateMainStaffHeaders(
+function updateStaffHeadersAndFloatingTexts(
   doc: Document,
   staffBody: Element,
   headers: ScoreHeadersState,
   concertTonality: TonalityDefinition,
-  targetInstrument: InstrumentDefinition
+  activeInstrumentHeaderLabel: string,
+  floatingTexts: FloatingTextBox[],
+  pageWidthSp: number,
+  pageHeightSp: number
 ): void {
   const vboxes = getDirectChildrenByTag(staffBody, 'VBox');
-  if (!headers.showAllHeaders) {
+  if (!headers.showAllHeaders && floatingTexts.length === 0) {
     for (const vbox of vboxes) {
       if (vbox.parentNode) {
         vbox.parentNode.removeChild(vbox);
@@ -1327,94 +1552,133 @@ function updateMainStaffHeaders(
     }
   }
 
-  const effectiveLyricistText = headers.lyricist.autoSyncPianoKey
-    ? `Tom para Piano:\n${concertTonality.majorName}`
-    : headers.lyricist.text;
-
-  const effectiveComposerText = headers.composer.autoSyncInstrument
-    ? targetInstrument.headerInstrumentText
-    : headers.composer.text;
-
-  const fieldMap: Record<
-    'title' | 'subtitle' | 'composer' | 'lyricist',
-    { styleLabel: string; text: string; visible: boolean; removed: boolean }
-  > = {
-    title: {
-      styleLabel: 'Title',
-      text: headers.title.text,
-      visible: headers.title.visible,
-      removed: headers.title.removed,
-    },
-    subtitle: {
-      styleLabel: 'Subtitle',
-      text: headers.subtitle.text,
-      visible: headers.subtitle.visible,
-      removed: headers.subtitle.removed,
-    },
-    composer: {
-      styleLabel: 'Composer',
-      text: effectiveComposerText,
-      visible: headers.composer.visible,
-      removed: headers.composer.removed,
-    },
-    lyricist: {
-      styleLabel: 'Lyricist',
-      text: effectiveLyricistText,
-      visible: headers.lyricist.visible,
-      removed: headers.lyricist.removed,
-    },
-  };
-
-  const existingTextEls = getDirectChildrenByTag(vbox, 'Text');
-  const handledKeys = new Set<string>();
-
-  for (const tb of existingTextEls) {
-    const rawStyle = (
-      getDirectChildText(tb, 'style') ||
-      getDirectChildText(tb, 'tid') ||
-      ''
-    ).toLowerCase();
-
-    let key: 'title' | 'subtitle' | 'composer' | 'lyricist' | null = null;
-    if (rawStyle === 'title') key = 'title';
-    else if (rawStyle === 'subtitle') key = 'subtitle';
-    else if (rawStyle === 'composer') key = 'composer';
-    else if (rawStyle === 'lyricist' || rawStyle === 'poet') key = 'lyricist';
-
-    if (!key) continue;
-    handledKeys.add(key);
-    const cfg = fieldMap[key];
-
-    if (cfg.removed || !cfg.visible || !cfg.text.trim()) {
+  // Remover textos flutuantes injetados anteriormente
+  const existingTexts = getDirectChildrenByTag(vbox, 'Text');
+  for (const tb of existingTexts) {
+    if (tb.getAttribute('data-floating') === '1') {
       vbox.removeChild(tb);
-    } else {
-      let textNode = getFirstDirectChildByTag(tb, 'text');
-      if (!textNode) {
-        textNode = doc.createElement('text');
-        tb.appendChild(textNode);
-      }
-      updateMscxTextPreservingFontTags(doc, textNode, cfg.text);
     }
   }
 
-  // Create any missing header blocks that the user enabled and filled in
-  (['title', 'subtitle', 'composer', 'lyricist'] as const).forEach((key) => {
-    if (handledKeys.has(key)) return;
-    const cfg = fieldMap[key];
-    if (cfg.removed || !cfg.visible || !cfg.text.trim()) return;
+  if (!headers.showAllHeaders) {
+    for (const tb of getDirectChildrenByTag(vbox, 'Text')) {
+      vbox.removeChild(tb);
+    }
+  } else {
+    const effectiveLyricistText = headers.lyricist.autoSyncPianoKey
+      ? `Tom para Piano:\n${concertTonality.majorName}`
+      : headers.lyricist.text;
 
+    const effectiveComposerText = headers.composer.autoSyncInstrument
+      ? activeInstrumentHeaderLabel
+      : headers.composer.text;
+
+    const fieldMap: Record<
+      'title' | 'subtitle' | 'composer' | 'lyricist',
+      { styleLabel: string; text: string; visible: boolean; removed: boolean }
+    > = {
+      title: {
+        styleLabel: 'Title',
+        text: headers.title.text,
+        visible: headers.title.visible,
+        removed: headers.title.removed,
+      },
+      subtitle: {
+        styleLabel: 'Subtitle',
+        text: headers.subtitle.text,
+        visible: headers.subtitle.visible,
+        removed: headers.subtitle.removed,
+      },
+      composer: {
+        styleLabel: 'Composer',
+        text: effectiveComposerText,
+        visible: headers.composer.visible,
+        removed: headers.composer.removed,
+      },
+      lyricist: {
+        styleLabel: 'Lyricist',
+        text: effectiveLyricistText,
+        visible: headers.lyricist.visible,
+        removed: headers.lyricist.removed,
+      },
+    };
+
+    const currentTextEls = getDirectChildrenByTag(vbox, 'Text');
+    const handledKeys = new Set<string>();
+
+    for (const tb of currentTextEls) {
+      const rawStyle = (
+        getDirectChildText(tb, 'style') ||
+        getDirectChildText(tb, 'tid') ||
+        ''
+      ).toLowerCase();
+
+      let key: 'title' | 'subtitle' | 'composer' | 'lyricist' | null = null;
+      if (rawStyle === 'title') key = 'title';
+      else if (rawStyle === 'subtitle') key = 'subtitle';
+      else if (rawStyle === 'composer') key = 'composer';
+      else if (rawStyle === 'lyricist' || rawStyle === 'poet') key = 'lyricist';
+
+      if (!key) continue;
+      handledKeys.add(key);
+      const cfg = fieldMap[key];
+
+      if (cfg.removed || !cfg.visible || !cfg.text.trim()) {
+        vbox.removeChild(tb);
+      } else {
+        let textNode = getFirstDirectChildByTag(tb, 'text');
+        if (!textNode) {
+          textNode = doc.createElement('text');
+          tb.appendChild(textNode);
+        }
+        updateMscxTextPreservingFontTags(doc, textNode, cfg.text);
+      }
+    }
+
+    (['title', 'subtitle', 'composer', 'lyricist'] as const).forEach((key) => {
+      if (handledKeys.has(key)) return;
+      const cfg = fieldMap[key];
+      if (cfg.removed || !cfg.visible || !cfg.text.trim()) return;
+
+      const tb = doc.createElement('Text');
+      setOrCreateDirectChildText(doc, tb, 'style', cfg.styleLabel);
+      const textNode = doc.createElement('text');
+      textNode.appendChild(doc.createTextNode(cfg.text));
+      tb.appendChild(textNode);
+      vbox!.appendChild(tb);
+    });
+  }
+
+  // Injetar Caixas de Texto Flutuantes no VBox com coordenadas em Spatium (sp)
+  for (const ft of floatingTexts) {
+    if (!ft.text || !ft.text.trim()) continue;
     const tb = doc.createElement('Text');
-    setOrCreateDirectChildText(doc, tb, 'style', cfg.styleLabel);
+    tb.setAttribute('data-floating', '1');
+    setOrCreateDirectChildText(doc, tb, 'style', 'Lyricist');
+
+    // A âncora de Lyricist no VBox fica no canto esquerdo (~6% X) e base do VBox (~9% Y)
+    const offsetX = ((ft.xPercent - 6.0) / 100) * pageWidthSp;
+    const offsetY = ((ft.yPercent - 9.0) / 100) * pageHeightSp;
+
+    const offsetEl = doc.createElement('offset');
+    offsetEl.setAttribute('x', offsetX.toFixed(2));
+    offsetEl.setAttribute('y', offsetY.toFixed(2));
+    tb.appendChild(offsetEl);
+
     const textNode = doc.createElement('text');
-    textNode.appendChild(doc.createTextNode(cfg.text));
+    const fontEl = doc.createElement('font');
+    fontEl.setAttribute('size', String(ft.fontSize || 12));
+    textNode.appendChild(fontEl);
+    textNode.appendChild(doc.createTextNode(ft.text));
     tb.appendChild(textNode);
-    vbox!.appendChild(tb);
-  });
+
+    vbox.appendChild(tb);
+  }
 }
 
 /**
- * Recompacta o .mscx modificado dentro do arquivo .mscz original (preservando META-INF/container.xml e estilos)
- * ou cria um pacote .mscz válido a partir de um .mscx / .xml
+ * Recompacta o .mscx modificado dentro do arquivo .mscz original (preservando estilos .mss, áudio e estrutura)
+ * e normaliza o nome interno para "score.mscx" em container.xml para compatibilidade 100% no Linux/Docker.
  */
 export async function buildModifiedMsczBuffer(
   originalFileBuffer: ArrayBuffer | Uint8Array | Buffer,
@@ -1427,25 +1691,29 @@ export async function buildModifiedMsczBuffer(
       ? originalFileBuffer
       : new Uint8Array(originalFileBuffer);
 
-  if (ext.endsWith('.mscz')) {
-    const zip = await JSZip.loadAsync(uint8);
-    const entryNames = Object.keys(zip.files);
-    const mscxEntryName =
-      entryNames.find((n) => n.toLowerCase().endsWith('.mscx')) || 'score.mscx';
-    zip.file(mscxEntryName, modifiedMscxContent);
-    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-  }
-
-  // Se o upload original foi .mscx ou .xml, empacota em um .mscz padrão do MuseScore 3
-  const zip = new JSZip();
-  const internalName = 'score.mscx';
+  const safeInternalMscxName = 'score.mscx';
   const containerXml = `<?xml version="1.0" encoding="UTF-8"?>
 <container>
   <rootfiles>
-    <rootfile full-path="${internalName}"/>
+    <rootfile full-path="${safeInternalMscxName}"/>
   </rootfiles>
 </container>`;
+
+  if (ext.endsWith('.mscz')) {
+    const zip = await JSZip.loadAsync(uint8);
+    const entryNames = Object.keys(zip.files);
+    for (const name of entryNames) {
+      if (name.toLowerCase().endsWith('.mscx')) {
+        zip.remove(name);
+      }
+    }
+    zip.file('META-INF/container.xml', containerXml);
+    zip.file(safeInternalMscxName, modifiedMscxContent);
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  }
+
+  const zip = new JSZip();
   zip.file('META-INF/container.xml', containerXml);
-  zip.file(internalName, modifiedMscxContent);
+  zip.file(safeInternalMscxName, modifiedMscxContent);
   return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 }

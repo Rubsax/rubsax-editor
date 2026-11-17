@@ -7,6 +7,7 @@ import { AlertTriangle, CheckCircle2, Piano, Music2 } from 'lucide-react';
 interface BbEbChordModalProps {
   open: boolean;
   instrument: InstrumentDefinition;
+  instrumentDisplayName: string;
   concertTonality: TonalityDefinition;
   writtenTonality: TonalityDefinition;
   sampleChords: string[];
@@ -17,6 +18,7 @@ interface BbEbChordModalProps {
 export default function BbEbChordModal({
   open,
   instrument,
+  instrumentDisplayName,
   concertTonality,
   writtenTonality,
   sampleChords,
@@ -25,8 +27,8 @@ export default function BbEbChordModal({
 }: BbEbChordModalProps) {
   if (!open) return null;
 
-  const isBb = instrument.groupId === 'BB_TREBLE';
-  const tuningBadge = isBb ? 'Sib (Bb) • +2 Semitons' : 'Mib (Eb) • -3 / +9 Semitons';
+  const isBb = instrument.groupId === 'BB_TREBLE' || instrument.fifthsOffset === 2;
+  const tuningShort = isBb ? 'Sib' : 'Mib';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
@@ -38,10 +40,10 @@ export default function BbEbChordModal({
           </div>
           <div>
             <span className="inline-block text-[11px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sax-500/20 text-sax-300 border border-sax-500/30 mb-0.5">
-              Instrumento Transpositor • {tuningBadge}
+              Instrumento Transpositor • {tuningShort}
             </span>
             <h3 className="text-base sm:text-lg font-bold text-white">
-              Sincronização de Cifras ({instrument.name})
+              Sincronização de Cifras ({instrumentDisplayName})
             </h3>
           </div>
         </div>
@@ -69,12 +71,12 @@ export default function BbEbChordModal({
             <div className="p-3 rounded-xl bg-sax-500/10 border border-sax-500/30">
               <div className="flex items-center gap-1.5 text-sax-300 font-semibold mb-1">
                 <Music2 className="w-4 h-4 text-sax-400" />
-                <span>Opção 2: Converter p/ {isBb ? 'Sib' : 'Mib'}</span>
+                <span>Opção 2: Converter p/ {tuningShort}</span>
               </div>
               <p className="text-zinc-300">
                 Na Pauta:{' '}
-                <strong className="text-sax-400">{writtenTonality.majorName}</strong>. Transpõe{' '}
-                <code className="text-sax-300">&lt;Harmony&gt;</code> ({isBb ? '+2 semitons' : '-3/+9 semitons'}) para bater com a armadura da pauta.
+                <strong className="text-sax-400">{writtenTonality.majorName}</strong>. Converte
+                as cifras visíveis para acompanhar a armadura de clave da pauta.
               </p>
             </div>
           </div>
@@ -92,12 +94,6 @@ export default function BbEbChordModal({
               ))}
             </div>
           )}
-
-          <p className="text-[11px] text-zinc-400">
-            Nota: Todas as cifras da pauta principal permanecem automaticamente mutadas (
-            <code>&lt;play&gt;0&lt;/play&gt;</code>) para não gerar dissonância com as pautas
-            ocultas de acompanhamento.
-          </p>
         </div>
 
         {/* Rodapé de Ações */}
@@ -115,7 +111,7 @@ export default function BbEbChordModal({
             className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-bold shadow-lg shadow-sax-500/20 transition"
           >
             <CheckCircle2 className="w-4 h-4" />
-            <span>Converter Cifras para {isBb ? 'Sib (Bb)' : 'Mib (Eb)'}</span>
+            <span>Converter p/ {tuningShort}</span>
           </button>
         </div>
       </div>

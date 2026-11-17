@@ -1,9 +1,10 @@
 # Dockerfile para Deploy no Coolify / Hetzner Cloud (Ubuntu/Debian + Node 20 + MuseScore 3 Headless)
 FROM node:20-bookworm-slim AS base
 
-# 1. Instalar dependências de sistema + MuseScore 3 + Xvfb (para renderização headless de PDF/SVG) + fontes
+# 1. Instalar dependências de sistema + MuseScore 3 + Fontconfig + Xvfb + Fontes
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    fontconfig \
     musescore3 \
     xvfb \
     xauth \
@@ -34,12 +35,22 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
-# No Debian/Ubuntu, o pacote musescore3 instala o binário "mscore3" (ou "musescore3")
-ENV MUSESCORE_BIN_PATH="mscore3"
-ENV MUSESCORE_USE_XVFB="1"
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-RUN addgroup --system --gid 1001 nodejs \
-    && adduser --system --uid 1001 nextjs
+# Configuração definitiva de diretórios de cache, runtime e offscreen para o MuseScore 3 (mscore3)
+RUN addgroup --system --gid 1001 nodejs && \
+    adduser --system --uid 1001 nextjs && \
+    mkdir -p /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home && \
+    chmod -R 777 /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home && \
+    chown -R nextjs:nodejs /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home && \
+    fc-cache -f -v
+
+ENV HOME=/tmp/musescore-home
+ENV XDG_RUNTIME_DIR=/tmp/runtime-rubsax
+ENV XDG_CACHE_HOME=/tmp/fontconfig-cache
+ENV QT_QPA_PLATFORM=offscreen
+ENV MUSESCORE_BIN_PATH="mscore3"
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
