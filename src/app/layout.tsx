@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'RUBSAX TRANSPOSER v1.1 | Transpositor de Partituras',
+  title: 'RUBSAX TRANSPOSER v1.2 | Transpositor de Partituras',
   description:
     'Transposição precisa com fidelidade original • Formatos aceitos: .mscz, .mscx, .xml',
   icons: {

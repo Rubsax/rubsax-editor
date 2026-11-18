@@ -102,6 +102,7 @@ export default function RubsaxWorkspace() {
   // Viewer & Preview trigger state
   const [canvasTheme, setCanvasTheme] = useState<CanvasThemeMode>('parchment');
   const [showBbEbModal, setShowBbEbModal] = useState<boolean>(false);
+  const [showUnappliedChangesModal, setShowUnappliedChangesModal] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<MobileTabId>('transpose');
   const [showHeaderEditorModal, setShowHeaderEditorModal] = useState<boolean>(false);
   const [renderVersion, setRenderVersion] = useState<number>(0);
@@ -457,7 +458,7 @@ export default function RubsaxWorkspace() {
 
   const isPdfBlocked = viewMode === 'continuous-vertical';
 
-  const handleExportPdf = async () => {
+  const executeExportPdf = async () => {
     if (!analysis || !originalMscx || !originalBase64 || isPdfBlocked) return;
     setIsExportingPdf(true);
     setUploadError(null);
@@ -523,6 +524,15 @@ export default function RubsaxWorkspace() {
     }
   };
 
+  const handleRequestExportPdf = () => {
+    if (isPdfBlocked || isExportingPdf) return;
+    if (hasUnrenderedChanges) {
+      setShowUnappliedChangesModal(true);
+      return;
+    }
+    void executeExportPdf();
+  };
+
   const isBbOrEbActive =
     (activeStaffSummary?.writtenSemitoneOffset ?? 0) !== 0 ||
     activeInstrument.groupId === 'BB_TREBLE' ||
@@ -579,7 +589,7 @@ export default function RubsaxWorkspace() {
                   RUBSAX <span className="text-sax-400">TRANSPOSER</span>
                 </h1>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                  v1.1
+                  v1.2
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 hidden sm:block">
@@ -643,7 +653,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 disabled={isExportingPdf || isPdfBlocked}
-                onClick={handleExportPdf}
+                onClick={handleRequestExportPdf}
                 title={
                   isPdfBlocked
                     ? 'Exportação PDF indisponível no modo Vertical Contínua. Volte para Vertical (Paginado) ou Grade Completa.'
@@ -733,7 +743,7 @@ export default function RubsaxWorkspace() {
 
                 <div className="space-y-2 max-w-lg">
                   <span className="inline-block text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                    RUBSAX TRANSPOSER v1.1
+                    RUBSAX TRANSPOSER v1.2
                   </span>
                   <h2 className="text-xl sm:text-2xl font-extrabold text-white">
                     Envie sua Partitura para Começar
@@ -1019,7 +1029,7 @@ export default function RubsaxWorkspace() {
                   <button
                     type="button"
                     disabled={isExportingPdf || isPdfBlocked}
-                    onClick={handleExportPdf}
+                    onClick={handleRequestExportPdf}
                     title={
                       isPdfBlocked
                         ? 'PDF indisponível no modo Vertical Contínua'
@@ -1403,6 +1413,48 @@ export default function RubsaxWorkspace() {
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
+                          </div>
+
+                          {/* Ajuste Fino de Posição (Ideal para Mobile & Precisão) */}
+                          <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-zinc-400">
+                            <label className="flex flex-col gap-0.5">
+                              <span>Horizontal (X): {Math.round(ft.xPercent)}%</span>
+                              <input
+                                type="range"
+                                min={2}
+                                max={88}
+                                step={1}
+                                value={ft.xPercent}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  setFloatingTexts((prev) =>
+                                    prev.map((item) =>
+                                      item.id === ft.id ? { ...item, xPercent: val } : item
+                                    )
+                                  );
+                                }}
+                                className="accent-sax-500 h-1.5"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-0.5">
+                              <span>Vertical (Y): {Math.round(ft.yPercent)}%</span>
+                              <input
+                                type="range"
+                                min={2}
+                                max={92}
+                                step={1}
+                                value={ft.yPercent}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  setFloatingTexts((prev) =>
+                                    prev.map((item) =>
+                                      item.id === ft.id ? { ...item, yPercent: val } : item
+                                    )
+                                  );
+                                }}
+                                className="accent-sax-500 h-1.5"
+                              />
+                            </label>
                           </div>
                         </div>
                       ))}
@@ -1874,6 +1926,87 @@ export default function RubsaxWorkspace() {
           setShowBbEbModal(false);
         }}
       />
+
+      {/* OVERLAY CENTRALIZADO E GRANDE: GERANDO PDF */}
+      {isExportingPdf && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-md p-6 sm:p-8 rounded-2xl bg-studio-900 border-2 border-sax-500/60 shadow-2xl flex flex-col items-center text-center gap-4">
+            <div className="w-16 h-16 rounded-2xl bg-sax-500/15 border border-sax-500/40 flex items-center justify-center">
+              <Loader2 className="w-10 h-10 text-sax-400 animate-spin" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className="text-lg sm:text-xl font-extrabold text-white tracking-tight">
+                Gerando PDF da Partitura...
+              </h3>
+              <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
+                O motor do MuseScore 3 está preparando seu arquivo PDF em alta definição. O
+                download começará automaticamente em instantes...
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL CENTRALIZADO DE AVISO: ALTERAÇÕES AINDA NÃO APLICADAS ANTES DE EXPORTAR PDF */}
+      {showUnappliedChangesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg rounded-2xl bg-studio-900 border-2 border-sax-500/50 shadow-2xl overflow-hidden text-zinc-100">
+            <div className="flex items-center gap-3 px-5 py-4 bg-gradient-to-r from-sax-600/25 via-sax-500/15 to-transparent border-b border-zinc-800">
+              <div className="p-2.5 rounded-xl bg-sax-500/20 border border-sax-500/40 text-sax-400">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <div>
+                <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sax-500/20 text-sax-300 border border-sax-500/30 mb-0.5">
+                  Conferência Antes do Download
+                </span>
+                <h3 className="text-base sm:text-lg font-extrabold text-white">
+                  Alterações Ainda Não Aplicadas
+                </h3>
+              </div>
+            </div>
+
+            <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-2">
+              <p>
+                Você fez alterações nos controles que ainda não foram aplicadas na visualização da
+                partitura. O que deseja fazer?
+              </p>
+            </div>
+
+            <div className="px-5 py-4 bg-studio-950 border-t border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowUnappliedChangesModal(false)}
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowUnappliedChangesModal(false);
+                  handleTriggerPreview();
+                }}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs font-extrabold transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Aplicar Alterações na Tela</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowUnappliedChangesModal(false);
+                  handleTriggerPreview();
+                  void executeExportPdf();
+                }}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 transition"
+              >
+                <FileDown className="w-3.5 h-3.5" />
+                <span>Aplicar e Gerar PDF Agora</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

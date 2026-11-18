@@ -1202,8 +1202,19 @@ export function transformScoreXml(
     parseFloat(getDirectChildText(styleEl, 'pageWidth', '8.27')) || 8.27;
   const pageHeightIn =
     parseFloat(getDirectChildText(styleEl, 'pageHeight', '11.69')) || 11.69;
-  const pageWidthSp = (pageWidthIn * 25.4) / spatiumMm;
-  const pageHeightSp = (pageHeightIn * 25.4) / spatiumMm;
+  const pageWidthMm = pageWidthIn * 25.4;
+  const pageHeightMm = pageHeightIn * 25.4;
+
+  const oddLeftMarginInStr = getDirectChildText(styleEl, 'pageOddLeftMargin', '');
+  const printableWidthInStr = getDirectChildText(styleEl, 'pagePrintableWidth', '');
+  const leftMarginMm = oddLeftMarginInStr
+    ? parseFloat(oddLeftMarginInStr) * 25.4
+    : printableWidthInStr
+    ? Math.max(8, (pageWidthMm - parseFloat(printableWidthInStr) * 25.4) / 2)
+    : 15.0;
+
+  const oddTopMarginInStr = getDirectChildText(styleEl, 'pageOddTopMargin', '');
+  const topMarginMm = oddTopMarginInStr ? parseFloat(oddTopMarginInStr) * 25.4 : 12.7;
 
   const metaTags = getDirectChildrenByTag(scoreEl, 'metaTag');
   let foundCopyrightMeta = false;
@@ -1296,8 +1307,11 @@ export function transformScoreXml(
       concertTonality,
       headerLabelForActiveMode,
       options.floatingTexts || [],
-      pageWidthSp,
-      pageHeightSp
+      pageWidthMm,
+      pageHeightMm,
+      leftMarginMm,
+      topMarginMm,
+      spatiumMm
     );
   }
 
@@ -1551,8 +1565,11 @@ function updateStaffHeadersAndFloatingTexts(
   concertTonality: TonalityDefinition,
   activeInstrumentHeaderLabel: string,
   floatingTexts: FloatingTextBox[],
-  pageWidthSp: number,
-  pageHeightSp: number
+  pageWidthMm: number,
+  pageHeightMm: number,
+  leftMarginMm: number,
+  topMarginMm: number,
+  spatiumMm: number
 ): void {
   const vboxes = getDirectChildrenByTag(staffBody, 'VBox');
   if (!headers.showAllHeaders && floatingTexts.length === 0) {
@@ -1673,16 +1690,31 @@ function updateStaffHeadersAndFloatingTexts(
     });
   }
 
-  // Injetar Caixas de Texto Flutuantes no VBox com coordenadas em Spatium (sp)
+  // Garantir <boxAutoSize>0</boxAutoSize> quando houver textos flutuantes para não empurrar as pautas para baixo
+  if (floatingTexts.length > 0) {
+    setOrCreateDirectChildText(doc, vbox, 'boxAutoSize', '0');
+  }
+
+  const vboxHeightSp = parseFloat(getDirectChildText(vbox, 'height', '7')) || 7;
+  const anchorXmm = leftMarginMm;
+  const anchorYmm = topMarginMm + vboxHeightSp * spatiumMm - 0.3;
+
+  // Injetar Caixas de Texto Flutuantes no VBox com coordenadas exatas em milímetros (mm)
   for (const ft of floatingTexts) {
     if (!ft.text || !ft.text.trim()) continue;
     const tb = doc.createElement('Text');
     tb.setAttribute('data-floating', '1');
     setOrCreateDirectChildText(doc, tb, 'style', 'Lyricist');
 
-    // A âncora de Lyricist no VBox fica no canto esquerdo (~6% X) e base do VBox (~9% Y)
-    const offsetX = ((ft.xPercent - 6.0) / 100) * pageWidthSp;
-    const offsetY = ((ft.yPercent - 9.0) / 100) * pageHeightSp;
+    const fontSizePt = ft.fontSize || 12;
+    const fontHeightMm = fontSizePt * 0.3527;
+
+    // Converter porcentagem (top-left na tela A4) diretamente para milímetros no MuseScore 3
+    const targetXmm = (ft.xPercent / 100) * pageWidthMm;
+    const targetYmm = (ft.yPercent / 100) * pageHeightMm + fontHeightMm;
+
+    const offsetX = targetXmm - anchorXmm;
+    const offsetY = targetYmm - anchorYmm;
 
     const offsetEl = doc.createElement('offset');
     offsetEl.setAttribute('x', offsetX.toFixed(2));
@@ -1691,7 +1723,7 @@ function updateStaffHeadersAndFloatingTexts(
 
     const textNode = doc.createElement('text');
     const fontEl = doc.createElement('font');
-    fontEl.setAttribute('size', String(ft.fontSize || 12));
+    fontEl.setAttribute('size', String(fontSizePt));
     textNode.appendChild(fontEl);
     textNode.appendChild(doc.createTextNode(ft.text));
     tb.appendChild(textNode);

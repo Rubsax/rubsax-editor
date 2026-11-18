@@ -34,6 +34,13 @@ interface ScoreViewerProps {
   onRequestPreview: () => void;
 }
 
+interface DragState {
+  id: string;
+  pageIdx: number;
+  grabOffsetXPx: number;
+  grabOffsetYPx: number;
+}
+
 export default function ScoreViewer({
   modifiedMscx,
   originalBase64,
@@ -52,8 +59,9 @@ export default function ScoreViewer({
   const [svgPages, setSvgPages] = useState<string[]>([]);
   const [svgLoading, setSvgLoading] = useState<boolean>(false);
   const [svgError, setSvgError] = useState<string | null>(null);
+  const [pageWidthPx, setPageWidthPx] = useState<number>(860);
 
-  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dragState, setDragState] = useState<DragState | null>(null);
   const pageRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -112,21 +120,104 @@ export default function ScoreViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderVersion, fileName]);
 
-  const handlePointerMove = (
-    e: React.PointerEvent<HTMLDivElement>,
-    pageIdx: number
-  ) => {
-    if (!draggingId) return;
-    const container = pageRefs.current[pageIdx];
+  // Monitora a largura exata do container SVG para escalar textos flutuantes em proporção 1:1 com A4 (595.44 pt)
+  useEffect(() => {
+    const el = pageRefs.current[0];
+    if (!el || typeof ResizeObserver === 'undefined') return;
+
+    const updateWidth = () => {
+      const w = el.getBoundingClientRect().width;
+      if (w > 50) setPageWidthPx(w);
+    };
+    updateWidth();
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [svgPages, zoom, viewMode]);
+
+  const updateDragPosition = (clientX: number, clientY: number, currentDrag: DragState) => {
+    const container = pageRefs.current[currentDrag.pageIdx];
     if (!container) return;
     const rect = container.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const rawX = ((e.clientX - rect.left) / rect.width) * 100;
-    const rawY = ((e.clientY - rect.top) / rect.height) * 100;
-    const clampedX = Math.max(2, Math.min(92, rawX));
-    const clampedY = Math.max(2, Math.min(94, rawY));
-    onUpdateFloatingTextPosition(draggingId, clampedX, clampedY);
+    const targetLeftPx = clientX - currentDrag.grabOffsetXPx - rect.left;
+    const targetTopPx = clientY - currentDrag.grabOffsetYPx - rect.top;
+
+    const rawX = (targetLeftPx / rect.width) * 100;
+    const rawY = (targetTopPx / rect.height) * 100;
+    const clampedX = Math.max(1, Math.min(92, Number(rawX.toFixed(2))));
+    const clampedY = Math.max(1, Math.min(95, Number(rawY.toFixed(2))));
+    onUpdateFloatingTextPosition(currentDrag.id, clampedX, clampedY);
+  };
+
+  const renderFloatingOverlayBoxes = (pageIdx: number, list: FloatingTextBox[]) => {
+    return list
+      .filter((ft) => ft.text.trim())
+      .map((ft) => {
+        const isDraggingThis = dragState?.id === ft.id;
+        // 1 A4 width = 8.27 in = 595.44 pt -> garante mesma proporção tipográfica do PDF
+        const scaledFontPx = Math.max(8, (ft.fontSize || 12) * (pageWidthPx / 595.44));
+
+        return (
+          <div
+            key={ft.id}
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const targetEl = e.currentTarget as HTMLElement;
+              const boxRect = targetEl.getBoundingClientRect();
+              try {
+                targetEl.setPointerCapture(e.pointerId);
+              } catch {
+                // Ignora caso o browser não suporte pointer capture
+              }
+              setDragState({
+                id: ft.id,
+                pageIdx,
+                grabOffsetXPx: e.clientX - boxRect.left,
+                grabOffsetYPx: e.clientY - boxRect.top,
+              });
+            }}
+            onPointerMove={(e) => {
+              if (!dragState || dragState.id !== ft.id) return;
+              e.preventDefault();
+              e.stopPropagation();
+              updateDragPosition(e.clientX, e.clientY, dragState);
+            }}
+            onPointerUp={(e) => {
+              if (!dragState || dragState.id !== ft.id) return;
+              e.stopPropagation();
+              try {
+                (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+              } catch {
+                // Ignore
+              }
+              setDragState(null);
+            }}
+            onPointerCancel={() => setDragState(null)}
+            style={{
+              touchAction: 'none',
+              left: `${ft.xPercent}%`,
+              top: `${ft.yPercent}%`,
+              fontSize: `${scaledFontPx}px`,
+              fontFamily: 'Georgia, "Times New Roman", serif',
+            }}
+            className={`absolute z-20 cursor-grab active:cursor-grabbing touch-none select-none px-2 py-1 min-h-[28px] rounded border transition-colors flex items-center gap-1 ${
+              isDraggingThis
+                ? 'border-sax-500 bg-sax-500/25 shadow-lg ring-2 ring-sax-400/60'
+                : 'border-amber-700/45 hover:border-sax-500 bg-black/[0.04]'
+            }`}
+            title="Arraste com o mouse ou dedo para posicionar na partitura"
+          >
+            <Move className="w-3 h-3 opacity-60 shrink-0 pointer-events-none" />
+            <span className="font-semibold whitespace-pre-wrap leading-none text-stone-950 pointer-events-none">
+              {ft.text}
+            </span>
+          </div>
+        );
+      });
   };
 
   const bgClass =
@@ -322,10 +413,7 @@ export default function ScoreViewer({
                 ref={(el) => {
                   pageRefs.current[0] = el;
                 }}
-                onPointerMove={(e) => handlePointerMove(e, 0)}
-                onPointerUp={() => setDraggingId(null)}
-                onPointerLeave={() => setDraggingId(null)}
-                className="w-full p-2 sm:p-4 select-none relative flex flex-col"
+                className="w-full select-none relative flex flex-col"
               >
                 {svgPages.map((svgHtml, idx) => (
                   <div
@@ -335,41 +423,7 @@ export default function ScoreViewer({
                   />
                 ))}
 
-                {/* Caixas de Texto Flutuantes sobre a folha contínua */}
-                {floatingTexts
-                  .filter((ft) => ft.text.trim())
-                  .map((ft) => (
-                    <div
-                      key={ft.id}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-                        setDraggingId(ft.id);
-                      }}
-                      onPointerUp={(e) => {
-                        e.stopPropagation();
-                        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-                        setDraggingId(null);
-                      }}
-                      style={{
-                        left: `${ft.xPercent}%`,
-                        top: `${ft.yPercent}%`,
-                        fontSize: `${ft.fontSize}px`,
-                        fontFamily: 'Georgia, "Times New Roman", serif',
-                      }}
-                      className={`absolute z-10 cursor-move px-2 py-0.5 rounded border transition select-none flex items-center gap-1 ${
-                        draggingId === ft.id
-                          ? 'border-sax-500 bg-sax-500/20 shadow-lg ring-2 ring-sax-400/50'
-                          : 'border-amber-700/40 hover:border-sax-500 bg-black/[0.03]'
-                      }`}
-                      title="Arraste para posicionar livremente sobre a partitura"
-                    >
-                      <Move className="w-3 h-3 opacity-50 shrink-0" />
-                      <span className="font-semibold whitespace-pre-wrap leading-tight text-stone-950">
-                        {ft.text}
-                      </span>
-                    </div>
-                  ))}
+                {renderFloatingOverlayBoxes(0, floatingTexts)}
               </div>
 
               {/* Marca d'Água Obrigatória Fixa apenas ao final da leitura contínua */}
@@ -403,50 +457,16 @@ export default function ScoreViewer({
                     </span>
                   </div>
 
-                  {/* Superfície da Página com SVG Nativo do MuseScore 3 + Caixas de Texto Flutuantes Arrastáveis */}
+                  {/* Superfície exata A4 sem padding para alinhamento 1:1 com coordenadas em mm do PDF */}
                   <div
                     ref={(el) => {
                       pageRefs.current[idx] = el;
                     }}
-                    onPointerMove={(e) => handlePointerMove(e, idx)}
-                    onPointerUp={() => setDraggingId(null)}
-                    onPointerLeave={() => setDraggingId(null)}
-                    className="w-full p-2 sm:p-4 select-none relative"
+                    className="w-full select-none relative"
                   >
                     <div dangerouslySetInnerHTML={{ __html: svgHtml }} />
 
-                    {pageFloatingTexts.map((ft) => (
-                      <div
-                        key={ft.id}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-                          setDraggingId(ft.id);
-                        }}
-                        onPointerUp={(e) => {
-                          e.stopPropagation();
-                          (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-                          setDraggingId(null);
-                        }}
-                        style={{
-                          left: `${ft.xPercent}%`,
-                          top: `${ft.yPercent}%`,
-                          fontSize: `${ft.fontSize}px`,
-                          fontFamily: 'Georgia, "Times New Roman", serif',
-                        }}
-                        className={`absolute z-10 cursor-move px-2 py-0.5 rounded border transition select-none flex items-center gap-1 ${
-                          draggingId === ft.id
-                            ? 'border-sax-500 bg-sax-500/20 shadow-lg ring-2 ring-sax-400/50'
-                            : 'border-amber-700/40 hover:border-sax-500 bg-black/[0.03]'
-                        }`}
-                        title="Arraste para posicionar livremente sobre a partitura"
-                      >
-                        <Move className="w-3 h-3 opacity-50 shrink-0" />
-                        <span className="font-semibold whitespace-pre-wrap leading-tight text-stone-950">
-                          {ft.text}
-                        </span>
-                      </div>
-                    ))}
+                    {renderFloatingOverlayBoxes(idx, pageFloatingTexts)}
                   </div>
 
                   {/* Marca d'Água Obrigatória Fixa e Imutável na Tela */}
