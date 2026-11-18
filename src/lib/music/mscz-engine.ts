@@ -21,7 +21,7 @@ export const UNSUPPORTED_FORMAT_MESSAGE =
 export const ALLOWED_EXTENSIONS = ['.mscz', '.mscx', '.xml', '.musicxml', '.mxl'];
 export const BLOCKED_EXTENSIONS = ['.mus', '.musx', '.sib', '.mid', '.midi', '.enc'];
 
-export type ScoreLayoutViewMode = 'portrait' | 'continuous-vertical' | 'full-score';
+export type ScoreLayoutViewMode = 'portrait' | 'full-score';
 
 export interface FloatingTextBox {
   id: string;
@@ -100,6 +100,8 @@ export interface ScoreAnalysis {
   headers: ScoreHeadersState;
   staves: StaffSummary[];
   watermarkText: string;
+  originalSpatium: number;
+  initialLineBreakMeasures: number[];
 }
 
 export interface ScoreTransformOptions {
@@ -113,7 +115,7 @@ export interface ScoreTransformOptions {
   selectedStaffId: string;
   /** Multiple selected staff IDs when user keeps specific staves active */
   selectedStaffIds?: string[];
-  /** Layout mode: portrait A4, continuous-vertical (no page breaks), or full-score stacked staves */
+  /** Layout mode: portrait A4 or full-score stacked staves */
   viewMode: ScoreLayoutViewMode;
   /** Whether visible chords on a Sib/Mib staff should be transposed to the instrument's written key */
   convertBbEbChordsToWritten: boolean;
@@ -126,6 +128,10 @@ export interface ScoreTransformOptions {
   chordOverrides: Record<string, string>;
   /** User-created floating text boxes positioned over the score */
   floatingTexts: FloatingTextBox[];
+  /** 1-based measure numbers where <LayoutBreak><subtype>line</subtype></LayoutBreak> must be active */
+  lineBreakMeasures?: number[];
+  /** Staff scale multiplier percentage applied to <Style><Spatium> (default 100) */
+  staffScalePercent?: number;
 }
 
 export interface TransformResult {
@@ -987,16 +993,34 @@ export function analyzeScoreXml(
   const concertTonality = getTonalityByFifths(concertKeyFifths);
   const writtenTonality = getTonalityByFifths(writtenKeyFifths);
 
+  const styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
+  const rawSpatium = styleEl
+    ? getDirectChildText(styleEl, 'Spatium') || getDirectChildText(styleEl, 'spatium')
+    : '';
+  const parsedSpatium = parseFloat(rawSpatium);
+  const originalSpatium = parsedSpatium > 0 ? parsedSpatium : 1.75;
+
   let measureCount = 0;
   let noteCount = 0;
   let chordCount = 0;
   let lyricCount = 0;
   const sampleChords: string[] = [];
   const concertPitches: number[] = [];
+  const initialLineBreakMeasures: number[] = [];
 
   if (mainStaffBody) {
     const measures = getDirectChildrenByTag(mainStaffBody, 'Measure');
     measureCount = measures.length;
+
+    measures.forEach((mEl, idx) => {
+      const breaks = getDirectChildrenByTag(mEl, 'LayoutBreak');
+      const hasLineBreak = breaks.some(
+        (lb) => getDirectChildText(lb, 'subtype').toLowerCase() === 'line'
+      );
+      if (hasLineBreak) {
+        initialLineBreakMeasures.push(idx + 1);
+      }
+    });
 
     const notes = mainStaffBody.getElementsByTagName('Note');
     noteCount = notes.length;
@@ -1094,6 +1118,8 @@ export function analyzeScoreXml(
     },
     staves: stavesSummary,
     watermarkText: 'Rubsax Partituras',
+    originalSpatium,
+    initialLineBreakMeasures,
   };
 }
 
@@ -1120,7 +1146,6 @@ export function transformScoreXml(
   const semitoneShift = options.semitoneShift;
   const viewMode: ScoreLayoutViewMode = options.viewMode || 'portrait';
   const isFullScore = viewMode === 'full-score';
-  const isContinuousVertical = viewMode === 'continuous-vertical';
 
   // Determinar conjunto de pautas ativas (Grade Completa = todas, ou seleção múltipla personalizada)
   const rawSelectedIds = isFullScore
@@ -1167,7 +1192,7 @@ export function transformScoreXml(
   // 2. Garantir layoutMode paginado (removendo line/system para renderização limpa)
   removeDirectChildrenByTag(scoreEl, 'layoutMode');
 
-  // 3. Configurar <Style>: Dimensões A4, Espaçamento Vertical Contínuo, Nomes na Grade e Marca d'Água
+  // 3. Configurar <Style>: Dimensões A4, Escala Vetorial, Nomes na Grade e Marca d'Água
   let styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
   if (!styleEl) {
     styleEl = doc.createElement('Style');
@@ -1178,14 +1203,8 @@ export function transformScoreXml(
   setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '11.69');
   setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '7.09');
 
-  if (isContinuousVertical) {
-    setOrCreateDirectChildText(doc, styleEl, 'enableVerticalSpread', '0');
-    setOrCreateDirectChildText(doc, styleEl, 'showFooter', '0');
-    setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '0');
-  } else {
-    setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
-    setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
-  }
+  setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
+  setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
 
   if (multipleStavesActive) {
     setOrCreateDirectChildText(doc, styleEl, 'hideInstrumentNameIfOneInstrument', '0');
@@ -1196,8 +1215,20 @@ export function transformScoreXml(
   setOrCreateDirectChildText(doc, styleEl, 'oddFooterC', '© Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'evenFooterC', '© Rubsax Partituras');
 
-  const spatiumMm =
-    parseFloat(getDirectChildText(styleEl, 'Spatium', '1.75')) || 1.75;
+  // Escala vetorial da pauta (<Spatium>) mantendo textos do cabeçalho em pontos fixos
+  const scaleRatio = Math.max(0.5, Math.min(1.5, (options.staffScalePercent ?? 100) / 100));
+  const baseSpatium = analysis.originalSpatium || 1.75;
+  const effectiveSpatium = Number((baseSpatium * scaleRatio).toFixed(5));
+
+  removeDirectChildrenByTag(styleEl, 'spatium');
+  setOrCreateDirectChildText(doc, styleEl, 'Spatium', String(effectiveSpatium));
+  setOrCreateDirectChildText(doc, styleEl, 'titleFontSpatiumDependent', '0');
+  setOrCreateDirectChildText(doc, styleEl, 'subTitleFontSpatiumDependent', '0');
+  setOrCreateDirectChildText(doc, styleEl, 'composerFontSpatiumDependent', '0');
+  setOrCreateDirectChildText(doc, styleEl, 'lyricistFontSpatiumDependent', '0');
+  setOrCreateDirectChildText(doc, styleEl, 'poetFontSpatiumDependent', '0');
+
+  const spatiumMm = effectiveSpatium;
   const pageWidthIn =
     parseFloat(getDirectChildText(styleEl, 'pageWidth', '8.27')) || 8.27;
   const pageHeightIn =
@@ -1315,10 +1346,12 @@ export function transformScoreXml(
     );
   }
 
-  // 6. Processar cada <Staff> dentro de <Score> (Transposição, Oitava, Cifras e Letras)
+  // 6. Processar cada <Staff> dentro de <Score> (Quebras de Sistema, Transposição, Oitava, Cifras e Letras)
   const manualOctaveSemitones = options.octaveShift * 12;
   const previewChords: string[] = [];
   const chordOccurrences: ChordOccurrence[] = [];
+  const hasExplicitLineBreaks = options.lineBreakMeasures !== undefined;
+  const lineBreakSet = hasExplicitLineBreaks ? new Set(options.lineBreakMeasures) : null;
 
   staffBodies.forEach((staffBody, sIdx) => {
     const sid = staffBody.getAttribute('id') || String(sIdx + 1);
@@ -1334,6 +1367,29 @@ export function transformScoreXml(
       removeDirectChildrenByTag(staffBody, 'visible');
     } else {
       setOrCreateDirectChildText(doc, staffBody, 'visible', '0', 'Measure');
+    }
+
+    // Atualizar <LayoutBreak><subtype>line</subtype></LayoutBreak> em todos os compassos desta pauta
+    if (lineBreakSet) {
+      const staffMeasures = getDirectChildrenByTag(staffBody, 'Measure');
+      staffMeasures.forEach((mEl, mIdx) => {
+        const existingBreaks = getDirectChildrenByTag(mEl, 'LayoutBreak');
+        for (const lb of existingBreaks) {
+          if (getDirectChildText(lb, 'subtype').toLowerCase() === 'line') {
+            mEl.removeChild(lb);
+          }
+        }
+        if (lineBreakSet.has(mIdx + 1)) {
+          const lbEl = doc.createElement('LayoutBreak');
+          setOrCreateDirectChildText(doc, lbEl, 'subtype', 'line');
+          const firstVoice = getFirstDirectChildByTag(mEl, 'voice');
+          if (firstVoice) {
+            mEl.insertBefore(lbEl, firstVoice);
+          } else {
+            mEl.appendChild(lbEl);
+          }
+        }
+      });
     }
 
     // Ignorar transposição de alturas e armadura em pautas de Percussão / Bateria

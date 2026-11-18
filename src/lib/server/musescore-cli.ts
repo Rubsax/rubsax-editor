@@ -11,19 +11,34 @@ const execFileAsync = promisify(execFile);
 const TEMP_DIR_PREFIXES = ['rubsax_pdf_', 'rubsax_svg_', 'rubsax_conv_'] as const;
 const STALE_TEMP_AGE_MS = 2 * 60 * 1000;
 
+const MAX_PENDING_JOBS = 15;
+
 /**
  * Fila sequencial em memória para limitar a 1 execução simultânea do MuseScore 3,
  * protegendo servidores de 1 vCPU / 2 GB RAM contra picos de concorrência.
  */
 let museScoreQueueTail: Promise<void> = Promise.resolve();
+let pendingJobsCount = 0;
 
 function withMuseScoreLock<T>(task: () => Promise<T>): Promise<T> {
+  if (pendingJobsCount >= MAX_PENDING_JOBS) {
+    return Promise.reject(
+      new Error(
+        'Servidor ocupado processando outras partituras no momento. Aguarde alguns segundos e tente novamente.'
+      )
+    );
+  }
+
+  pendingJobsCount += 1;
   const run = museScoreQueueTail.then(task, task);
   museScoreQueueTail = run.then(
     () => undefined,
     () => undefined
   );
-  return run;
+
+  return run.finally(() => {
+    pendingJobsCount = Math.max(0, pendingJobsCount - 1);
+  });
 }
 
 /**

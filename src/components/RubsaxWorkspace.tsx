@@ -12,6 +12,7 @@ import {
   ScoreHeadersState,
   ScoreLayoutViewMode,
   ScoreTransformOptions,
+  TransformResult,
   UNSUPPORTED_FORMAT_MESSAGE,
   analyzeScoreXml,
   transformScoreXml,
@@ -20,6 +21,7 @@ import {
 } from '@/lib/music/mscz-engine';
 import ScoreViewer, { CanvasThemeMode } from './ScoreViewer';
 import BbEbChordModal from './BbEbChordModal';
+import EcosystemFooter from './EcosystemFooter';
 import {
   Upload,
   FileDown,
@@ -33,7 +35,6 @@ import {
   Check,
   RotateCcw,
   Layers,
-  Lock,
   Trash2,
   RefreshCw,
   Loader2,
@@ -41,11 +42,18 @@ import {
   Edit3,
   Move,
   FileText,
-  Ban,
+  BookOpen,
+  ShoppingCart,
+  SplitSquareVertical,
+  Scaling,
+  ShieldAlert,
 } from 'lucide-react';
 
 type TransposeDirectionMode = 'closest' | 'up' | 'down';
-type MobileTabId = 'transpose' | 'display' | 'headers' | 'staves';
+type SystemBreakMode = 'initial' | 'auto' | 'every-x' | 'custom';
+type MobileTabId = 'transpose' | 'display' | 'headers' | 'layout' | 'staves';
+
+const STAFF_SCALE_PILLS = [80, 85, 90, 95, 100, 105, 110] as const;
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = '';
@@ -61,6 +69,20 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 export default function RubsaxWorkspace() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Aceite obrigatório de Direitos Autorais (persistido em localStorage)
+  const [copyrightAccepted, setCopyrightAccepted] = useState<boolean>(false);
+  const [copyrightError, setCopyrightError] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('rubsax_copyright_accepted') === 'true') {
+        setCopyrightAccepted(true);
+      }
+    } catch {
+      // Ignora erro caso localStorage não esteja disponível
+    }
+  }, []);
+
   // Raw file state (Upload First: starts empty with no sample loaded)
   const [originalBase64, setOriginalBase64] = useState<string>('');
   const [originalMscx, setOriginalMscx] = useState<string>('');
@@ -72,7 +94,7 @@ export default function RubsaxWorkspace() {
   const [isLoadingFile, setIsLoadingFile] = useState<boolean>(false);
   const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
 
-  // Transform controls state
+  // Transform controls state (atualizados sincronamente em 0ms)
   const [semitoneShift, setSemitoneShift] = useState<number>(0);
   const [transposeDirection, setTransposeDirection] =
     useState<TransposeDirectionMode>('closest');
@@ -92,6 +114,12 @@ export default function RubsaxWorkspace() {
     lyricist: { text: '', visible: true, removed: false, autoSyncPianoKey: true },
   });
 
+  // Quebra de Compasso (Sistema) e Tamanho da Pauta (Escala <Spatium>)
+  const [lineBreakMeasures, setLineBreakMeasures] = useState<number[]>([]);
+  const [systemBreakMode, setSystemBreakMode] = useState<SystemBreakMode>('initial');
+  const [measuresPerLineInput, setMeasuresPerLineInput] = useState<number>(4);
+  const [staffScalePercent, setStaffScalePercent] = useState<number>(100);
+
   // Edição de Cifras Existentes & Caixas de Texto Flutuantes
   const [chordOverrides, setChordOverrides] = useState<Record<string, string>>({});
   const [editingChordKey, setEditingChordKey] = useState<string | null>(null);
@@ -99,7 +127,13 @@ export default function RubsaxWorkspace() {
   const [chordEditMode, setChordEditMode] = useState<'symbol' | 'occurrence'>('symbol');
   const [floatingTexts, setFloatingTexts] = useState<FloatingTextBox[]>([]);
 
-  // Viewer & Preview trigger state
+  // Optimistic UI & Async Transform / SVG Status
+  const [transformResult, setTransformResult] = useState<TransformResult | null>(null);
+  const [isTransformComputing, setIsTransformComputing] = useState<boolean>(false);
+  const [isSvgLoading, setIsSvgLoading] = useState<boolean>(false);
+  const [activeActionId, setActiveActionId] = useState<string | null>(null);
+
+  // Viewer & Modals
   const [canvasTheme, setCanvasTheme] = useState<CanvasThemeMode>('parchment');
   const [showBbEbModal, setShowBbEbModal] = useState<boolean>(false);
   const [showUnappliedChangesModal, setShowUnappliedChangesModal] = useState<boolean>(false);
@@ -107,7 +141,50 @@ export default function RubsaxWorkspace() {
   const [showHeaderEditorModal, setShowHeaderEditorModal] = useState<boolean>(false);
   const [renderVersion, setRenderVersion] = useState<number>(0);
   const [renderedSnapshotMscx, setRenderedSnapshotMscx] = useState<string>('');
-  const skipNextHeaderDebounceRef = useRef<boolean>(false);
+
+  const renderedSnapshotMscxRef = useRef<string>('');
+  const skipNextAutoTransformRef = useRef<boolean>(false);
+  const pendingApplyDelayRef = useRef<number | null>(null);
+  const wasSvgLoadingRef = useRef<boolean>(false);
+
+  const isProcessing = isSvgLoading || isTransformComputing;
+
+  const scheduleScoreAction = useCallback(
+    (actionId: string, delayMs = 45) => {
+      setActiveActionId(actionId);
+      pendingApplyDelayRef.current = delayMs;
+      setIsTransformComputing(true);
+    },
+    []
+  );
+
+  const handleToggleCopyright = (checked: boolean) => {
+    setCopyrightAccepted(checked);
+    if (checked) {
+      setCopyrightError(false);
+      setUploadError(null);
+      try {
+        localStorage.setItem('rubsax_copyright_accepted', 'true');
+      } catch {
+        // Ignore
+      }
+    } else {
+      try {
+        localStorage.removeItem('rubsax_copyright_accepted');
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  const ensureCopyrightAccepted = useCallback((): boolean => {
+    if (copyrightAccepted) return true;
+    setCopyrightError(true);
+    setUploadError(
+      'Aceite o termo de responsabilidade de direitos autorais abaixo para liberar o envio do arquivo.'
+    );
+    return false;
+  }, [copyrightAccepted]);
 
   const loadScoreFromBuffer = useCallback(
     async (arrayBuf: ArrayBuffer, fileName: string) => {
@@ -174,6 +251,8 @@ export default function RubsaxWorkspace() {
           headers: scoreAnalysis.headers,
           chordOverrides: {},
           floatingTexts: [],
+          lineBreakMeasures: scoreAnalysis.initialLineBreakMeasures,
+          staffScalePercent: 100,
         };
 
         const initialTransform = transformScoreXml(
@@ -182,7 +261,7 @@ export default function RubsaxWorkspace() {
           initialOptions
         );
 
-        skipNextHeaderDebounceRef.current = true;
+        skipNextAutoTransformRef.current = true;
         setOriginalBase64(b64);
         setOriginalMscx(unpacked.mscxContent);
         setAnalysis(scoreAnalysis);
@@ -196,10 +275,20 @@ export default function RubsaxWorkspace() {
         setShowChords(true);
         setShowLyrics(true);
         setHeaders(scoreAnalysis.headers);
+        setLineBreakMeasures(scoreAnalysis.initialLineBreakMeasures);
+        setSystemBreakMode(
+          scoreAnalysis.initialLineBreakMeasures.length > 0 ? 'initial' : 'auto'
+        );
+        setMeasuresPerLineInput(4);
+        setStaffScalePercent(100);
         setChordOverrides({});
         setEditingChordKey(null);
         setFloatingTexts([]);
+        setActiveActionId(null);
+        setIsTransformComputing(false);
 
+        setTransformResult(initialTransform);
+        renderedSnapshotMscxRef.current = initialTransform.modifiedMscx;
         setRenderedSnapshotMscx(initialTransform.modifiedMscx);
         setRenderVersion((v) => v + 1);
 
@@ -221,6 +310,9 @@ export default function RubsaxWorkspace() {
 
   const handleFileUpload = useCallback(
     async (file: File) => {
+      if (!ensureCopyrightAccepted()) {
+        return;
+      }
       const validation = validateUploadFileName(file.name);
       if (!validation.valid) {
         setUploadError(validation.error || UNSUPPORTED_FORMAT_MESSAGE);
@@ -229,7 +321,7 @@ export default function RubsaxWorkspace() {
       const buf = await file.arrayBuffer();
       await loadScoreFromBuffer(buf, file.name);
     },
-    [loadScoreFromBuffer]
+    [ensureCopyrightAccepted, loadScoreFromBuffer]
   );
 
   const handleSelectTargetConcertPitchClass = (targetPc: number) => {
@@ -245,6 +337,8 @@ export default function RubsaxWorkspace() {
     } else if (transposeDirection === 'down') {
       shift = rawDiff === 0 ? 0 : rawDiff - 12;
     }
+    if (shift === semitoneShift) return;
+    scheduleScoreAction('tonality-select', 60);
     setSemitoneShift(shift);
   };
 
@@ -263,6 +357,8 @@ export default function RubsaxWorkspace() {
       headers,
       chordOverrides,
       floatingTexts: [],
+      lineBreakMeasures,
+      staffScalePercent,
     }),
     [
       semitoneShift,
@@ -275,6 +371,8 @@ export default function RubsaxWorkspace() {
       showLyrics,
       headers,
       chordOverrides,
+      lineBreakMeasures,
+      staffScalePercent,
     ]
   );
 
@@ -287,16 +385,7 @@ export default function RubsaxWorkspace() {
     [screenTransformOptions, floatingTexts]
   );
 
-  const transformResult = useMemo(() => {
-    if (!analysis || !originalMscx) return null;
-    try {
-      return transformScoreXml(originalMscx, analysis, screenTransformOptions);
-    } catch (err) {
-      console.error('Erro ao transformar XML:', err);
-      return null;
-    }
-  }, [analysis, originalMscx, screenTransformOptions]);
-
+  // Cálculo instantâneo de 0ms em memória pura para pautas & tonalidades exibidas no visor
   const activeInstrument = useMemo(
     () => getInstrumentById(targetInstrumentId),
     [targetInstrumentId]
@@ -316,15 +405,64 @@ export default function RubsaxWorkspace() {
     return selectedStavesList[0] || analysis.staves[0] || null;
   }, [analysis, selectedStavesList]);
 
-  const currentConcertTonality =
-    transformResult?.concertTonality ||
-    analysis?.originalConcertTonality ||
-    getTonalityByPitchClass(0);
+  const currentConcertTonality = useMemo(() => {
+    if (!analysis) return getTonalityByPitchClass(0);
+    const concertPc =
+      ((analysis.originalConcertPitchClass + semitoneShift) % 12 + 12) % 12;
+    return getTonalityByPitchClass(concertPc);
+  }, [analysis, semitoneShift]);
 
-  const currentWrittenTonality =
-    transformResult?.writtenTonality ||
-    analysis?.originalWrittenTonality ||
-    getTonalityByPitchClass(0);
+  const currentWrittenTonality = useMemo(() => {
+    if (!analysis) return getTonalityByPitchClass(0);
+    const offset = activeStaffSummary?.writtenSemitoneOffset ?? 0;
+    const writtenPc =
+      ((currentConcertTonality.pitchClass + offset) % 12 + 12) % 12;
+    return getTonalityByPitchClass(writtenPc);
+  }, [analysis, currentConcertTonality, activeStaffSummary]);
+
+  // Executa a transformação XML em segundo plano APÓS o browser pintar a resposta otimista em 0ms
+  useEffect(() => {
+    if (!analysis || !originalMscx) return;
+
+    if (skipNextAutoTransformRef.current) {
+      skipNextAutoTransformRef.current = false;
+      setIsTransformComputing(false);
+      return;
+    }
+
+    const delay = pendingApplyDelayRef.current ?? 160;
+    pendingApplyDelayRef.current = null;
+    setIsTransformComputing(true);
+
+    const timer = setTimeout(() => {
+      try {
+        const res = transformScoreXml(originalMscx, analysis, screenTransformOptions);
+        setTransformResult(res);
+        if (res.modifiedMscx !== renderedSnapshotMscxRef.current) {
+          renderedSnapshotMscxRef.current = res.modifiedMscx;
+          setRenderedSnapshotMscx(res.modifiedMscx);
+          setRenderVersion((v) => v + 1);
+        } else {
+          setActiveActionId(null);
+        }
+      } catch (err) {
+        console.error('Erro ao transformar XML:', err);
+        setActiveActionId(null);
+      } finally {
+        setIsTransformComputing(false);
+      }
+    }, delay);
+
+    return () => clearTimeout(timer);
+  }, [analysis, originalMscx, screenTransformOptions]);
+
+  // Limpa o micro-spinner do botão recém-acionado assim que o servidor conclui a renderização do SVG
+  useEffect(() => {
+    if (wasSvgLoadingRef.current && !isSvgLoading && !isTransformComputing) {
+      setActiveActionId(null);
+    }
+    wasSvgLoadingRef.current = isSvgLoading;
+  }, [isSvgLoading, isTransformComputing]);
 
   const hasUnrenderedChanges = Boolean(
     transformResult &&
@@ -332,69 +470,59 @@ export default function RubsaxWorkspace() {
       transformResult.modifiedMscx !== renderedSnapshotMscx
   );
 
-  // Atualização instantânea no visor quando o usuário edita, oculta ou remove textos do cabeçalho
-  useEffect(() => {
+  const handleTriggerPreview = useCallback(() => {
     if (!analysis || !originalMscx) return;
-    if (skipNextHeaderDebounceRef.current) {
-      skipNextHeaderDebounceRef.current = false;
+    if (transformResult && transformResult.modifiedMscx !== renderedSnapshotMscxRef.current) {
+      renderedSnapshotMscxRef.current = transformResult.modifiedMscx;
+      setRenderedSnapshotMscx(transformResult.modifiedMscx);
+      setRenderVersion((v) => v + 1);
       return;
     }
-
-    const timer = setTimeout(() => {
+    setActiveActionId('manual-apply');
+    setIsTransformComputing(true);
+    setTimeout(() => {
       try {
         const res = transformScoreXml(originalMscx, analysis, screenTransformOptions);
+        setTransformResult(res);
+        renderedSnapshotMscxRef.current = res.modifiedMscx;
         setRenderedSnapshotMscx(res.modifiedMscx);
         setRenderVersion((v) => v + 1);
-      } catch (err) {
-        console.error('Erro ao atualizar cabeçalho:', err);
+      } finally {
+        setIsTransformComputing(false);
       }
-    }, 350);
-
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headers]);
-
-  const handleTriggerPreview = useCallback(() => {
-    if (!transformResult) return;
-    setRenderedSnapshotMscx(transformResult.modifiedMscx);
-    setRenderVersion((v) => v + 1);
-  }, [transformResult]);
+    }, 16);
+  }, [analysis, originalMscx, screenTransformOptions, transformResult]);
 
   const handleChangeViewMode = (mode: ScoreLayoutViewMode) => {
+    if (viewMode === mode) return;
+    const actionId = mode === 'portrait' ? 'view-portrait' : 'view-full-score';
+    if (isSvgLoading && activeActionId === actionId) return;
+    scheduleScoreAction(actionId, 30);
     setViewMode(mode);
-    if (analysis && originalMscx) {
-      const nextOpts: ScoreTransformOptions = {
-        ...screenTransformOptions,
-        viewMode: mode,
-      };
-      const res = transformScoreXml(originalMscx, analysis, nextOpts);
-      setRenderedSnapshotMscx(res.modifiedMscx);
-      setRenderVersion((v) => v + 1);
-    }
   };
 
   const handleSelectSingleStaff = (staffId: string) => {
-    const nextIds = [staffId];
-    setSelectedStaffIds(nextIds);
-    const nextMode: ScoreLayoutViewMode =
-      viewMode === 'full-score' ? 'portrait' : viewMode;
-    setViewMode(nextMode);
-
-    if (analysis && originalMscx) {
-      const nextOpts: ScoreTransformOptions = {
-        ...screenTransformOptions,
-        selectedStaffId: staffId,
-        selectedStaffIds: nextIds,
-        viewMode: nextMode,
-      };
-      const res = transformScoreXml(originalMscx, analysis, nextOpts);
-      setRenderedSnapshotMscx(res.modifiedMscx);
-      setRenderVersion((v) => v + 1);
+    if (
+      viewMode !== 'full-score' &&
+      selectedStaffIds.length === 1 &&
+      selectedStaffIds[0] === staffId
+    ) {
+      return;
+    }
+    const actionId = `staff-solo-${staffId}`;
+    if (isSvgLoading && activeActionId === actionId) return;
+    scheduleScoreAction(actionId, 30);
+    setSelectedStaffIds([staffId]);
+    if (viewMode === 'full-score') {
+      setViewMode('portrait');
     }
   };
 
   const handleToggleStaffActive = (staffId: string) => {
     if (!analysis) return;
+    const actionId = `staff-toggle-${staffId}`;
+    if (isSvgLoading && activeActionId === actionId) return;
+
     const baseIds =
       viewMode === 'full-score'
         ? analysis.staves.map((s) => s.staffId)
@@ -403,34 +531,71 @@ export default function RubsaxWorkspace() {
     let nextIds: string[];
     if (baseIds.includes(staffId)) {
       if (baseIds.length <= 1) {
-        // Garante que pelo menos 1 pauta continue ativa
         return;
       }
       nextIds = baseIds.filter((id) => id !== staffId);
     } else {
-      // Preserva a ordem original das pautas no arquivo
       nextIds = analysis.staves
         .map((s) => s.staffId)
         .filter((id) => baseIds.includes(id) || id === staffId);
     }
 
-    const nextMode: ScoreLayoutViewMode =
-      viewMode === 'full-score' ? 'portrait' : viewMode;
-
+    scheduleScoreAction(actionId, 30);
     setSelectedStaffIds(nextIds);
-    setViewMode(nextMode);
-
-    if (originalMscx) {
-      const nextOpts: ScoreTransformOptions = {
-        ...screenTransformOptions,
-        selectedStaffId: nextIds[0] || '1',
-        selectedStaffIds: nextIds,
-        viewMode: nextMode,
-      };
-      const res = transformScoreXml(originalMscx, analysis, nextOpts);
-      setRenderedSnapshotMscx(res.modifiedMscx);
-      setRenderVersion((v) => v + 1);
+    if (viewMode === 'full-score') {
+      setViewMode('portrait');
     }
+  };
+
+  // Handlers de Quebra de Compasso (Sistema)
+  const handleAutoSystemBreaks = () => {
+    if (lineBreakMeasures.length === 0) {
+      setSystemBreakMode('auto');
+      return;
+    }
+    if (isSvgLoading && activeActionId === 'break-auto') return;
+    scheduleScoreAction('break-auto', 30);
+    setSystemBreakMode('auto');
+    setLineBreakMeasures([]);
+  };
+
+  const handleApplyEveryXMeasures = () => {
+    if (!analysis) return;
+    if (isSvgLoading && activeActionId === 'break-every-x') return;
+    const step = Math.max(1, Math.min(12, measuresPerLineInput || 4));
+    const nextBreaks: number[] = [];
+    for (let m = step; m < analysis.measureCount; m += step) {
+      nextBreaks.push(m);
+    }
+    setSystemBreakMode('every-x');
+    const changed =
+      nextBreaks.length !== lineBreakMeasures.length ||
+      nextBreaks.some((v, idx) => v !== lineBreakMeasures[idx]);
+    if (!changed) return;
+    scheduleScoreAction('break-every-x', 30);
+    setLineBreakMeasures(nextBreaks);
+  };
+
+  const handleToggleMeasureBreak = (measureNumber: number) => {
+    const actionId = `break-measure-${measureNumber}`;
+    if (isSvgLoading && activeActionId === actionId) return;
+    scheduleScoreAction(actionId, 30);
+    setSystemBreakMode('custom');
+    setLineBreakMeasures((prev) => {
+      if (prev.includes(measureNumber)) {
+        return prev.filter((n) => n !== measureNumber);
+      }
+      return [...prev, measureNumber].sort((a, b) => a - b);
+    });
+  };
+
+  // Handler de Escala Vetorial (<Spatium>)
+  const handleChangeStaffScale = (nextPercent: number, actionId: string, delayMs = 45) => {
+    const clamped = Math.max(70, Math.min(130, nextPercent));
+    if (clamped === staffScalePercent) return;
+    if (isSvgLoading && activeActionId === actionId) return;
+    scheduleScoreAction(actionId, delayMs);
+    setStaffScalePercent(clamped);
   };
 
   const handleAddFloatingText = () => {
@@ -456,10 +621,8 @@ export default function RubsaxWorkspace() {
     []
   );
 
-  const isPdfBlocked = viewMode === 'continuous-vertical';
-
   const executeExportPdf = async () => {
-    if (!analysis || !originalMscx || !originalBase64 || isPdfBlocked) return;
+    if (!analysis || !originalMscx || !originalBase64) return;
     setIsExportingPdf(true);
     setUploadError(null);
     try {
@@ -525,8 +688,8 @@ export default function RubsaxWorkspace() {
   };
 
   const handleRequestExportPdf = () => {
-    if (isPdfBlocked || isExportingPdf) return;
-    if (hasUnrenderedChanges) {
+    if (isExportingPdf) return;
+    if (isProcessing || hasUnrenderedChanges) {
       setShowUnappliedChangesModal(true);
       return;
     }
@@ -565,17 +728,17 @@ export default function RubsaxWorkspace() {
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f) handleFileUpload(f);
+          if (f) void handleFileUpload(f);
           e.target.value = '';
         }}
       />
 
-      {/* BARRA SUPERIOR PRINCIPAL: Identidade RUBSAX TRANSPOSER v1.0 + Resumo de Tonalidade Limpo + Ações */}
+      {/* BARRA SUPERIOR PRINCIPAL: RUBSAX TRANSPOSER v1.3 + Ecossistema + Tonalidade + Ações */}
       <header className="sticky top-0 z-30 bg-studio-900/95 backdrop-blur-md border-b border-zinc-800 px-3 sm:px-5 py-2.5 shadow-lg">
-        <div className="max-w-[1800px] mx-auto flex flex-wrap items-center justify-between gap-3">
+        <div className="max-w-[1800px] mx-auto flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
           {/* Logo & Marca Oficial */}
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sax-400 to-sax-600 p-1 flex items-center justify-center shadow-md shadow-sax-500/20 overflow-hidden">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sax-400 to-sax-600 p-1 flex items-center justify-center shadow-md shadow-sax-500/20 overflow-hidden shrink-0">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src="/icon.png"
@@ -589,7 +752,7 @@ export default function RubsaxWorkspace() {
                   RUBSAX <span className="text-sax-400">TRANSPOSER</span>
                 </h1>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                  v1.2
+                  v1.3
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 hidden sm:block">
@@ -598,9 +761,32 @@ export default function RubsaxWorkspace() {
             </div>
           </div>
 
-          {/* VISOR CENTRAL DE TONALIDADE (Sem badge de contagem de acidentes) */}
+          {/* Botões do Ecossistema Rubsax (Visíveis sempre no Desktop e Mobile) */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            <a
+              href="https://catalogo.rubsax.com.br/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-95 transition-transform duration-75 touch-manipulation"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-sax-400" />
+              <span>Catálogo</span>
+            </a>
+
+            <a
+              href="https://www.rubsax.com.br/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-sax-500/20 hover:bg-sax-500/30 text-sax-300 text-xs font-extrabold border border-sax-500/50 shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+            >
+              <ShoppingCart className="w-3.5 h-3.5 text-sax-400" />
+              <span>Loja Oficial</span>
+            </a>
+          </div>
+
+          {/* VISOR CENTRAL DE TONALIDADE */}
           {analysis && (
-            <div className="flex-1 max-w-2xl mx-auto px-3.5 py-1.5 rounded-xl bg-studio-950/90 border border-zinc-700/80 shadow-inner flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs sm:text-sm">
+            <div className="flex-1 min-w-[260px] max-w-2xl mx-auto px-3.5 py-1.5 rounded-xl bg-studio-950/90 border border-zinc-700/80 shadow-inner flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs sm:text-sm">
               <div className="flex items-center gap-1.5">
                 <span className="text-zinc-400 font-medium">Tom Base (Piano):</span>
                 <span className="font-extrabold text-sky-300">
@@ -629,8 +815,11 @@ export default function RubsaxWorkspace() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold border border-zinc-700 transition"
+                onClick={() => {
+                  if (!ensureCopyrightAccepted()) return;
+                  fileInputRef.current?.click();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold border border-zinc-700 active:scale-95 transition-transform duration-75 touch-manipulation"
               >
                 <Upload className="w-3.5 h-3.5 text-sax-400" />
                 <span className="hidden sm:inline">Enviar .mscz / .xml</span>
@@ -640,37 +829,31 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={handleTriggerPreview}
-                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border transition ${
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
                   hasUnrenderedChanges
                     ? 'bg-emerald-500 hover:bg-emerald-400 text-studio-950 border-emerald-400 shadow-lg shadow-emerald-500/20'
                     : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
                 }`}
               >
-                <RefreshCw className="w-3.5 h-3.5" />
+                {isProcessing ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-sax-400" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
                 <span>Aplicar Alterações</span>
               </button>
 
               <button
                 type="button"
-                disabled={isExportingPdf || isPdfBlocked}
+                disabled={isExportingPdf}
                 onClick={handleRequestExportPdf}
-                title={
-                  isPdfBlocked
-                    ? 'Exportação PDF indisponível no modo Vertical Contínua. Volte para Vertical (Paginado) ou Grade Completa.'
-                    : 'Exportar PDF fiel pelo MuseScore 3'
-                }
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 transition"
+                title="Exportar PDF fiel pelo MuseScore 3"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 active:scale-95 transition-transform duration-75 touch-manipulation"
               >
                 {isExportingPdf ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     <span>Gerando PDF...</span>
-                  </>
-                ) : isPdfBlocked ? (
-                  <>
-                    <Ban className="w-4 h-4" />
-                    <span className="hidden sm:inline">PDF Bloqueado (Contínuo)</span>
-                    <span className="sm:hidden">PDF Off</span>
                   </>
                 ) : (
                   <>
@@ -701,7 +884,7 @@ export default function RubsaxWorkspace() {
         </div>
       )}
 
-      {/* TELA INICIAL "UPLOAD FIRST" (Exibida quando nenhuma partitura foi enviada ainda) */}
+      {/* TELA INICIAL "UPLOAD FIRST" */}
       {!analysis ? (
         <main className="flex-1 flex items-center justify-center p-4 sm:p-8">
           <div
@@ -713,11 +896,16 @@ export default function RubsaxWorkspace() {
             onDrop={(e) => {
               e.preventDefault();
               setIsDragging(false);
+              if (!ensureCopyrightAccepted()) return;
               const f = e.dataTransfer.files?.[0];
-              if (f) handleFileUpload(f);
+              if (f) void handleFileUpload(f);
             }}
-            onClick={() => !isLoadingFile && fileInputRef.current?.click()}
-            className={`w-full max-w-2xl rounded-3xl border-2 border-dashed p-8 sm:p-14 text-center cursor-pointer transition-all shadow-2xl ${
+            onClick={() => {
+              if (isLoadingFile) return;
+              if (!ensureCopyrightAccepted()) return;
+              fileInputRef.current?.click();
+            }}
+            className={`w-full max-w-2xl rounded-3xl border-2 border-dashed p-6 sm:p-12 text-center cursor-pointer transition-all shadow-2xl ${
               isDragging
                 ? 'border-sax-400 bg-sax-500/10 scale-[1.01]'
                 : 'border-zinc-700/80 bg-studio-900/80 hover:border-sax-500/60 hover:bg-studio-900'
@@ -727,9 +915,9 @@ export default function RubsaxWorkspace() {
               <div className="flex flex-col items-center justify-center py-8 gap-4">
                 <Loader2 className="w-12 h-12 text-sax-400 animate-spin" />
                 <div className="space-y-1">
-                  <h2 className="text-lg sm:text-xl font-extrabold text-white">
+                  <p className="text-lg sm:text-xl font-extrabold text-white">
                     Processando sua partitura...
-                  </h2>
+                  </p>
                   <p className="text-xs sm:text-sm text-zinc-400">
                     Extraindo estrutura musical, pautas internas e diagramação original do MuseScore 3.
                   </p>
@@ -743,11 +931,14 @@ export default function RubsaxWorkspace() {
 
                 <div className="space-y-2 max-w-lg">
                   <span className="inline-block text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                    RUBSAX TRANSPOSER v1.2
+                    RUBSAX TRANSPOSER v1.3
                   </span>
-                  <h2 className="text-xl sm:text-2xl font-extrabold text-white">
-                    Envie sua Partitura para Começar
+                  <h2 className="text-sm sm:text-base font-bold text-sax-300 tracking-wide">
+                    Transpositor de Partituras e Extrator de Partes Online
                   </h2>
+                  <p className="text-xl sm:text-2xl font-extrabold text-white">
+                    Envie sua Partitura para Começar
+                  </p>
                   <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
                     Arraste e solte o arquivo aqui ou clique para selecionar do seu celular ou
                     computador. Transponha o tom, edite cifras/cabeçalhos, extraia partes ocultas
@@ -755,19 +946,58 @@ export default function RubsaxWorkspace() {
                   </p>
                 </div>
 
+                {/* CHECKBOX OBRIGATÓRIO DE DIREITOS AUTORAIS */}
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className={`w-full max-w-xl text-left rounded-2xl p-3.5 sm:p-4 border transition ${
+                    copyrightError
+                      ? 'bg-red-950/40 border-red-500 ring-2 ring-red-500/30'
+                      : copyrightAccepted
+                      ? 'bg-sax-500/10 border-sax-500/45'
+                      : 'bg-studio-950/90 border-zinc-700 hover:border-sax-500/50'
+                  }`}
+                >
+                  <label className="flex items-start gap-3 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={copyrightAccepted}
+                      onChange={(e) => handleToggleCopyright(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded accent-[#D97706] cursor-pointer shrink-0"
+                    />
+                    <span className="text-xs text-zinc-200 leading-relaxed">
+                      Declaro possuir os direitos ou autorização para editar e transpor o material
+                      enviado, responsabilizando-me integralmente pelo uso do arquivo nos termos
+                      da Lei de Direitos Autorais (<strong>Lei nº 9.610/98</strong>).
+                    </span>
+                  </label>
+                  {copyrightError && !copyrightAccepted && (
+                    <div className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-red-300">
+                      <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                      <span>
+                        Marque a declaração acima para liberar o envio da sua partitura.
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (!ensureCopyrightAccepted()) return;
                     fileInputRef.current?.click();
                   }}
-                  className="inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 font-extrabold text-sm shadow-xl shadow-sax-500/20 transition"
+                  className={`inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl font-extrabold text-sm shadow-xl active:scale-95 transition-transform duration-75 touch-manipulation ${
+                    copyrightAccepted
+                      ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
+                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600 shadow-none'
+                  }`}
                 >
                   <Upload className="w-4 h-4" />
                   <span>Selecionar Arquivo (.mscz, .mscx, .xml)</span>
                 </button>
 
-                <div className="pt-2 flex flex-wrap items-center justify-center gap-2 text-[11px] text-zinc-400">
+                <div className="pt-1 flex flex-wrap items-center justify-center gap-2 text-[11px] text-zinc-400">
                   <span className="px-2.5 py-1 rounded-lg bg-studio-950 border border-zinc-800 font-mono text-zinc-300">
                     .mscz (MuseScore 3/4)
                   </span>
@@ -783,12 +1013,12 @@ export default function RubsaxWorkspace() {
           </div>
         </main>
       ) : (
-        /* INTERFACE COMPLETA DE EDIÇÃO, TRANSPOSIÇÃO E VISUALIZAÇÃO (Após o Upload) */
-        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden max-w-[1800px] w-full mx-auto">
+        /* INTERFACE COMPLETA DE EDIÇÃO, TRANSPOSIÇÃO E VISUALIZAÇÃO */
+        <div className="flex-1 flex flex-col lg:flex-row max-w-[1800px] w-full mx-auto lg:min-h-[calc(100vh-68px)]">
           {/* PAINEL LATERAL DE CONTROLES */}
-          <aside className="w-full lg:w-[400px] xl:w-[430px] shrink-0 bg-studio-900 border-b lg:border-b-0 lg:border-r border-zinc-800 flex flex-col overflow-y-auto order-2 lg:order-1 max-h-[48vh] lg:max-h-none">
-            {/* Abas Mobile no Rodapé */}
-            <div className="grid grid-cols-4 lg:hidden bg-studio-950 border-b border-zinc-800 text-[11px] font-semibold sticky top-0 z-20">
+          <aside className="w-full lg:w-[400px] xl:w-[430px] shrink-0 bg-studio-900 border-b lg:border-b-0 lg:border-r border-zinc-800 flex flex-col overflow-y-auto order-2 lg:order-1 max-h-[54vh] lg:max-h-[calc(100vh-68px)] lg:sticky lg:top-[68px]">
+            {/* Abas Mobile */}
+            <div className="grid grid-cols-5 lg:hidden bg-studio-950 border-b border-zinc-800 text-[10px] sm:text-[11px] font-semibold sticky top-0 z-20">
               <button
                 type="button"
                 onClick={() => setMobileTab('transpose')}
@@ -798,8 +1028,8 @@ export default function RubsaxWorkspace() {
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Sliders className="w-4 h-4" />
-                <span>Tom & 8va</span>
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Tom/8va</span>
               </button>
               <button
                 type="button"
@@ -810,8 +1040,8 @@ export default function RubsaxWorkspace() {
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Eye className="w-4 h-4" />
-                <span>Cifras/Letra</span>
+                <Eye className="w-3.5 h-3.5" />
+                <span>Cifras</span>
               </button>
               <button
                 type="button"
@@ -822,8 +1052,20 @@ export default function RubsaxWorkspace() {
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Type className="w-4 h-4" />
+                <Type className="w-3.5 h-3.5" />
                 <span>Textos</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileTab('layout')}
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                  mobileTab === 'layout'
+                    ? 'border-sax-500 text-sax-400 bg-sax-500/5'
+                    : 'border-transparent text-zinc-400'
+                }`}
+              >
+                <SplitSquareVertical className="w-3.5 h-3.5" />
+                <span>Sistema</span>
               </button>
               <button
                 type="button"
@@ -834,13 +1076,13 @@ export default function RubsaxWorkspace() {
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Layers className="w-4 h-4" />
+                <Layers className="w-3.5 h-3.5" />
                 <span>Pautas</span>
               </button>
             </div>
 
             <div className="p-4 space-y-4">
-              {/* 1. ARQUIVO DA PARTITURA (Sem botões de amostras) */}
+              {/* 1. ARQUIVO DA PARTITURA */}
               <div
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -851,7 +1093,7 @@ export default function RubsaxWorkspace() {
                   e.preventDefault();
                   setIsDragging(false);
                   const f = e.dataTransfer.files?.[0];
-                  if (f) handleFileUpload(f);
+                  if (f) void handleFileUpload(f);
                 }}
                 className={`${
                   mobileTab === 'headers' ? 'block' : 'hidden lg:block'
@@ -869,15 +1111,18 @@ export default function RubsaxWorkspace() {
 
                 <button
                   type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold transition"
+                  onClick={() => {
+                    if (!ensureCopyrightAccepted()) return;
+                    fileInputRef.current?.click();
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold active:scale-95 transition-transform duration-75 touch-manipulation"
                 >
                   <Upload className="w-4 h-4 text-sax-400" />
                   <span>Enviar outro arquivo (.mscz, .mscx, .xml)</span>
                 </button>
               </div>
 
-              {/* 2. TRANSPOSIÇÃO & OITAVA (Sem caixa verde técnica inferior) */}
+              {/* 2. TRANSPOSIÇÃO & OITAVA */}
               <section
                 className={`${
                   mobileTab === 'transpose' ? 'block' : 'hidden lg:block'
@@ -886,18 +1131,25 @@ export default function RubsaxWorkspace() {
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <Sliders className="w-4 h-4" />
-                    <span>Transposição & Oitava</span>
+                    <span>Transposição &amp; Oitava</span>
                   </h2>
                   {semitoneShift !== 0 || octaveShift !== 0 ? (
                     <button
                       type="button"
+                      disabled={isSvgLoading && activeActionId === 'transpose-reset'}
                       onClick={() => {
+                        if (isSvgLoading && activeActionId === 'transpose-reset') return;
+                        scheduleScoreAction('transpose-reset', 45);
                         setSemitoneShift(0);
                         setOctaveShift(0);
                       }}
-                      className="inline-flex items-center gap-1 text-[11px] text-sax-400 hover:text-sax-300 font-semibold"
+                      className="inline-flex items-center gap-1 text-[11px] text-sax-400 hover:text-sax-300 font-semibold active:scale-95 transition-transform duration-75 touch-manipulation"
                     >
-                      <RotateCcw className="w-3 h-3" />
+                      {isProcessing && activeActionId === 'transpose-reset' ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <RotateCcw className="w-3 h-3" />
+                      )}
                       <span>Resetar Original</span>
                     </button>
                   ) : (
@@ -909,9 +1161,9 @@ export default function RubsaxWorkspace() {
 
                 {/* Seletor Direto de Tonalidade */}
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center justify-between text-xs gap-1">
                     <label className="text-zinc-300 font-semibold">
-                      Ir para Tonalidade (Ref. Piano Dó):
+                      Ir para Tonalidade (Piano Dó):
                     </label>
                     <div className="flex items-center gap-1 text-[10px]">
                       {(
@@ -925,10 +1177,10 @@ export default function RubsaxWorkspace() {
                           key={dir.id}
                           type="button"
                           onClick={() => setTransposeDirection(dir.id)}
-                          className={`px-1.5 py-0.5 rounded transition ${
+                          className={`px-1.5 py-0.5 rounded active:scale-95 transition-transform duration-75 touch-manipulation ${
                             transposeDirection === dir.id
-                              ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40 font-bold'
-                              : 'bg-zinc-800 text-zinc-400'
+                              ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
+                              : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
                           }`}
                         >
                           {dir.label}
@@ -937,19 +1189,28 @@ export default function RubsaxWorkspace() {
                     </div>
                   </div>
 
-                  <select
-                    value={currentConcertTonality.pitchClass}
-                    onChange={(e) =>
-                      handleSelectTargetConcertPitchClass(parseInt(e.target.value, 10))
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-700 text-xs sm:text-sm font-semibold text-white focus:outline-none focus:border-sax-500"
-                  >
-                    {TONALITIES.map((t) => (
-                      <option key={t.pitchClass} value={t.pitchClass}>
-                        {t.fullLabel}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <select
+                      value={currentConcertTonality.pitchClass}
+                      onChange={(e) =>
+                        handleSelectTargetConcertPitchClass(parseInt(e.target.value, 10))
+                      }
+                      className={`w-full px-3 py-2 rounded-xl bg-zinc-900 border text-xs sm:text-sm font-semibold text-white focus:outline-none focus:border-sax-500 ${
+                        activeActionId === 'tonality-select' && isProcessing
+                          ? 'border-[#D97706] ring-1 ring-sax-400'
+                          : 'border-zinc-700'
+                      }`}
+                    >
+                      {TONALITIES.map((t) => (
+                        <option key={t.pitchClass} value={t.pitchClass}>
+                          {t.fullLabel}
+                        </option>
+                      ))}
+                    </select>
+                    {activeActionId === 'tonality-select' && isProcessing && (
+                      <Loader2 className="w-3.5 h-3.5 text-sax-400 animate-spin absolute right-8 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    )}
+                  </div>
                 </div>
 
                 {/* Botões Rápidos de Semitom */}
@@ -963,18 +1224,47 @@ export default function RubsaxWorkspace() {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => setSemitoneShift((s) => Math.max(-12, s - 1))}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:scale-[0.99] text-zinc-100 text-xs font-bold border border-zinc-700 transition"
+                      disabled={semitoneShift <= -12 || (isSvgLoading && activeActionId === 'semitone-down')}
+                      onClick={() => {
+                        if (semitoneShift <= -12 || (isSvgLoading && activeActionId === 'semitone-down')) return;
+                        scheduleScoreAction('semitone-down', 220);
+                        setSemitoneShift((s) => Math.max(-12, s - 1));
+                      }}
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 ${
+                        (isProcessing && activeActionId === 'semitone-down') ||
+                        semitoneShift < 0
+                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                      }`}
                     >
-                      <Minus className="w-4 h-4 text-sax-400" />
+                      {isProcessing && activeActionId === 'semitone-down' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Minus className="w-4 h-4" />
+                      )}
                       <span>-1 Semitom</span>
                     </button>
+
                     <button
                       type="button"
-                      onClick={() => setSemitoneShift((s) => Math.min(12, s + 1))}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:scale-[0.99] text-zinc-100 text-xs font-bold border border-zinc-700 transition"
+                      disabled={semitoneShift >= 12 || (isSvgLoading && activeActionId === 'semitone-up')}
+                      onClick={() => {
+                        if (semitoneShift >= 12 || (isSvgLoading && activeActionId === 'semitone-up')) return;
+                        scheduleScoreAction('semitone-up', 220);
+                        setSemitoneShift((s) => Math.min(12, s + 1));
+                      }}
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 ${
+                        (isProcessing && activeActionId === 'semitone-up') ||
+                        semitoneShift > 0
+                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                      }`}
                     >
-                      <Plus className="w-4 h-4 text-sax-400" />
+                      {isProcessing && activeActionId === 'semitone-up' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
                       <span>+1 Semitom</span>
                     </button>
                   </div>
@@ -994,57 +1284,84 @@ export default function RubsaxWorkspace() {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={() => setOctaveShift((o) => Math.max(-2, o - 1))}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 transition"
+                      disabled={octaveShift <= -2 || (isSvgLoading && activeActionId === 'octave-down')}
+                      onClick={() => {
+                        if (octaveShift <= -2 || (isSvgLoading && activeActionId === 'octave-down')) return;
+                        scheduleScoreAction('octave-down', 220);
+                        setOctaveShift((o) => Math.max(-2, o - 1));
+                      }}
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 ${
+                        (isProcessing && activeActionId === 'octave-down') ||
+                        octaveShift < 0
+                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                      }`}
                     >
-                      <Minus className="w-4 h-4 text-sky-400" />
+                      {isProcessing && activeActionId === 'octave-down' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Minus className="w-4 h-4" />
+                      )}
                       <span>-1 Oitava</span>
                     </button>
+
                     <button
                       type="button"
-                      onClick={() => setOctaveShift((o) => Math.min(2, o + 1))}
-                      className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 transition"
+                      disabled={octaveShift >= 2 || (isSvgLoading && activeActionId === 'octave-up')}
+                      onClick={() => {
+                        if (octaveShift >= 2 || (isSvgLoading && activeActionId === 'octave-up')) return;
+                        scheduleScoreAction('octave-up', 220);
+                        setOctaveShift((o) => Math.min(2, o + 1));
+                      }}
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 ${
+                        (isProcessing && activeActionId === 'octave-up') ||
+                        octaveShift > 0
+                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                      }`}
                     >
-                      <Plus className="w-4 h-4 text-sky-400" />
+                      {isProcessing && activeActionId === 'octave-up' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Plus className="w-4 h-4" />
+                      )}
                       <span>+1 Oitava</span>
                     </button>
                   </div>
                 </div>
 
-                {/* Dupla Ação Direta: Aplicar Alterações ou Exportar PDF Direto */}
+                {/* Dupla Ação Direta: Aplicar Alterações ou Exportar PDF */}
                 <div className="pt-2 border-t border-zinc-800/80 grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={handleTriggerPreview}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-bold border transition ${
+                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
                       hasUnrenderedChanges
                         ? 'bg-emerald-500 hover:bg-emerald-400 text-studio-950 border-emerald-400 shadow-md'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
                     }`}
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
+                    {isProcessing ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-sax-400" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
                     <span>Aplicar Alterações</span>
                   </button>
 
                   <button
                     type="button"
-                    disabled={isExportingPdf || isPdfBlocked}
+                    disabled={isExportingPdf}
                     onClick={handleRequestExportPdf}
-                    title={
-                      isPdfBlocked
-                        ? 'PDF indisponível no modo Vertical Contínua'
-                        : 'Baixar PDF fiel'
-                    }
-                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md transition"
+                    title="Baixar PDF fiel"
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
                   >
                     {isExportingPdf ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : isPdfBlocked ? (
-                      <Ban className="w-3.5 h-3.5" />
                     ) : (
                       <FileDown className="w-3.5 h-3.5" />
                     )}
-                    <span>{isPdfBlocked ? 'PDF Off' : 'Baixar PDF'}</span>
+                    <span>Baixar PDF</span>
                   </button>
                 </div>
               </section>
@@ -1060,7 +1377,7 @@ export default function RubsaxWorkspace() {
                 <div className="flex items-center justify-between">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <Eye className="w-4 h-4" />
-                    <span>Cifras, Letras & Textos</span>
+                    <span>Cifras, Letras &amp; Textos</span>
                   </h2>
                 </div>
 
@@ -1068,44 +1385,66 @@ export default function RubsaxWorkspace() {
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setShowChords((v) => !v)}
-                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border transition ${
+                    disabled={isSvgLoading && activeActionId === 'toggle-chords'}
+                    onClick={() => {
+                      if (isSvgLoading && activeActionId === 'toggle-chords') return;
+                      scheduleScoreAction('toggle-chords', 40);
+                      setShowChords((v) => !v);
+                    }}
+                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
                       showChords
-                        ? 'bg-sax-500/15 border-sax-500/50 text-sax-300'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+                        ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800'
                     }`}
                   >
                     <span className="flex items-center gap-1.5">
-                      {showChords ? (
-                        <Eye className="w-4 h-4 text-sax-400" />
+                      {isProcessing && activeActionId === 'toggle-chords' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : showChords ? (
+                        <Eye className="w-4 h-4" />
                       ) : (
                         <EyeOff className="w-4 h-4 text-zinc-500" />
                       )}
                       Cifras
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/30">
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        showChords ? 'bg-black/20 text-studio-950 font-bold' : 'bg-black/30'
+                      }`}
+                    >
                       {showChords ? 'Visíveis' : 'Ocultas'}
                     </span>
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => setShowLyrics((v) => !v)}
-                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border transition ${
+                    disabled={isSvgLoading && activeActionId === 'toggle-lyrics'}
+                    onClick={() => {
+                      if (isSvgLoading && activeActionId === 'toggle-lyrics') return;
+                      scheduleScoreAction('toggle-lyrics', 40);
+                      setShowLyrics((v) => !v);
+                    }}
+                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
                       showLyrics
-                        ? 'bg-sax-500/15 border-sax-500/50 text-sax-300'
-                        : 'bg-zinc-900 border-zinc-800 text-zinc-400'
+                        ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800'
                     }`}
                   >
                     <span className="flex items-center gap-1.5">
-                      {showLyrics ? (
-                        <Eye className="w-4 h-4 text-sax-400" />
+                      {isProcessing && activeActionId === 'toggle-lyrics' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : showLyrics ? (
+                        <Eye className="w-4 h-4" />
                       ) : (
                         <EyeOff className="w-4 h-4 text-zinc-500" />
                       )}
                       Letras
                     </span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-black/30">
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        showLyrics ? 'bg-black/20 text-studio-950 font-bold' : 'bg-black/30'
+                      }`}
+                    >
                       {showLyrics ? 'Visíveis' : 'Ocultas'}
                     </span>
                   </button>
@@ -1131,25 +1470,43 @@ export default function RubsaxWorkspace() {
                         <div className="grid grid-cols-2 gap-1.5 text-[11px]">
                           <button
                             type="button"
-                            onClick={() => setConvertBbEbChordsToWritten(false)}
-                            className={`py-1.5 px-2 rounded-lg font-semibold border transition ${
+                            disabled={isSvgLoading && activeActionId === 'chords-concert'}
+                            onClick={() => {
+                              if (!convertBbEbChordsToWritten) return;
+                              if (isSvgLoading && activeActionId === 'chords-concert') return;
+                              scheduleScoreAction('chords-concert', 40);
+                              setConvertBbEbChordsToWritten(false);
+                            }}
+                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
                               !convertBbEbChordsToWritten
-                                ? 'bg-sky-500/20 border-sky-400 text-sky-200'
+                                ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                             }`}
                           >
-                            Tom do Piano (Dó)
+                            {isProcessing && activeActionId === 'chords-concert' && (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            )}
+                            <span>Tom do Piano (Dó)</span>
                           </button>
                           <button
                             type="button"
-                            onClick={() => setConvertBbEbChordsToWritten(true)}
-                            className={`py-1.5 px-2 rounded-lg font-semibold border transition ${
+                            disabled={isSvgLoading && activeActionId === 'chords-written'}
+                            onClick={() => {
+                              if (convertBbEbChordsToWritten) return;
+                              if (isSvgLoading && activeActionId === 'chords-written') return;
+                              scheduleScoreAction('chords-written', 40);
+                              setConvertBbEbChordsToWritten(true);
+                            }}
+                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
                               convertBbEbChordsToWritten
-                                ? 'bg-sax-500 text-studio-950 border-sax-400 font-bold'
+                                ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                             }`}
                           >
-                            Converter p/ {transposingShortLabel}
+                            {isProcessing && activeActionId === 'chords-written' && (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            )}
+                            <span>Converter p/ {transposingShortLabel}</span>
                           </button>
                         </div>
                       </>
@@ -1167,6 +1524,7 @@ export default function RubsaxWorkspace() {
                             <button
                               type="button"
                               onClick={() => {
+                                scheduleScoreAction('chords-reset', 40);
                                 setChordOverrides({});
                                 setEditingChordKey(null);
                               }}
@@ -1205,7 +1563,7 @@ export default function RubsaxWorkspace() {
                                     setEditingChordKey(item.original);
                                     setEditingChordValue(item.current);
                                   }}
-                                  className={`px-2 py-1 rounded-lg font-mono text-xs font-bold border transition ${
+                                  className={`px-2 py-1 rounded-lg font-mono text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
                                     isSelected
                                       ? 'bg-sax-500 text-studio-950 border-sax-300 shadow-sm'
                                       : isModified
@@ -1283,13 +1641,14 @@ export default function RubsaxWorkspace() {
                                 type="button"
                                 onClick={() => {
                                   if (!editingChordValue.trim()) return;
+                                  scheduleScoreAction('chord-edit-apply', 40);
                                   setChordOverrides((prev) => ({
                                     ...prev,
                                     [editingChordKey]: editingChordValue.trim(),
                                   }));
                                   setEditingChordKey(null);
                                 }}
-                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-bold"
+                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-bold active:scale-95 transition-transform duration-75"
                               >
                                 Aplicar
                               </button>
@@ -1313,9 +1672,10 @@ export default function RubsaxWorkspace() {
                   <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        setHeaders((h) => ({ ...h, showAllHeaders: !h.showAllHeaders }))
-                      }
+                      onClick={() => {
+                        scheduleScoreAction('headers-toggle-all', 120);
+                        setHeaders((h) => ({ ...h, showAllHeaders: !h.showAllHeaders }));
+                      }}
                       className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-200 hover:text-sax-300"
                     >
                       {headers.showAllHeaders ? (
@@ -1347,7 +1707,7 @@ export default function RubsaxWorkspace() {
                   <button
                     type="button"
                     onClick={handleAddFloatingText}
-                    className="w-full py-2 px-3 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-1.5 transition"
+                    className="w-full py-2 px-3 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation"
                   >
                     <Plus className="w-4 h-4" />
                     <span>+ Adicionar Texto Flutuante</span>
@@ -1415,7 +1775,6 @@ export default function RubsaxWorkspace() {
                             </button>
                           </div>
 
-                          {/* Ajuste Fino de Posição (Ideal para Mobile & Precisão) */}
                           <div className="grid grid-cols-2 gap-2 pt-1 text-[10px] text-zinc-400">
                             <label className="flex flex-col gap-0.5">
                               <span>Horizontal (X): {Math.round(ft.xPercent)}%</span>
@@ -1471,282 +1830,514 @@ export default function RubsaxWorkspace() {
                       visor; fonte e tamanho originais travados):
                     </p>
 
-                      {/* Título */}
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <label className="font-semibold text-zinc-300">Título:</label>
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  title: {
-                                    ...h.title,
-                                    visible: !h.title.visible,
-                                    removed: false,
-                                  },
-                                }))
-                              }
-                              className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
-                            >
-                              {headers.title.visible && !headers.title.removed
-                                ? 'Ocultar'
-                                : 'Mostrar'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  title: { ...h.title, removed: !h.title.removed },
-                                }))
-                              }
-                              className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60"
-                              title="Remover Título"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
+                    {/* Título */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-zinc-300">Título:</label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-title-vis', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                title: {
+                                  ...h.title,
+                                  visible: !h.title.visible,
+                                  removed: false,
+                                },
+                              }));
+                            }}
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
+                          >
+                            {headers.title.visible && !headers.title.removed
+                              ? 'Ocultar'
+                              : 'Mostrar'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-title-rm', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                title: { ...h.title, removed: !h.title.removed },
+                              }));
+                            }}
+                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60"
+                            title="Remover Título"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
                         </div>
-                        <input
-                          type="text"
-                          disabled={headers.title.removed}
-                          value={headers.title.text}
-                          onChange={(e) =>
-                            setHeaders((h) => ({
-                              ...h,
-                              title: { ...h.title, text: e.target.value },
-                            }))
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                        />
                       </div>
-
-                      {/* Subtítulo */}
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <label className="font-semibold text-zinc-300">Subtítulo:</label>
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  subtitle: {
-                                    ...h.subtitle,
-                                    visible: !h.subtitle.visible,
-                                    removed: false,
-                                  },
-                                }))
-                              }
-                              className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
-                            >
-                              {headers.subtitle.visible && !headers.subtitle.removed
-                                ? 'Ocultar'
-                                : 'Mostrar'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  subtitle: { ...h.subtitle, removed: !h.subtitle.removed },
-                                }))
-                              }
-                              className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60"
-                              title="Remover Subtítulo"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                        <input
-                          type="text"
-                          disabled={headers.subtitle.removed}
-                          placeholder="Ex: Artista / Cantor"
-                          value={headers.subtitle.text}
-                          onChange={(e) =>
-                            setHeaders((h) => ({
-                              ...h,
-                              subtitle: {
-                                ...h.subtitle,
-                                text: e.target.value,
-                                visible: true,
-                                removed: false,
-                              },
-                            }))
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                        />
-                      </div>
-
-                      {/* Compositor / Instrumento (Canto Superior Direito) */}
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <label className="font-semibold text-zinc-300">
-                            Instrumento (Canto Sup. Direito):
-                          </label>
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  composer: {
-                                    ...h.composer,
-                                    autoSyncInstrument: !h.composer.autoSyncInstrument,
-                                  },
-                                }))
-                              }
-                              className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 ${
-                                headers.composer.autoSyncInstrument
-                                  ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
-                                  : 'bg-zinc-800 text-zinc-400'
-                              }`}
-                            >
-                              <RefreshCw className="w-2.5 h-2.5" />
-                              Auto Pauta
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  composer: {
-                                    ...h.composer,
-                                    visible: !h.composer.visible,
-                                    removed: false,
-                                  },
-                                }))
-                              }
-                              className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
-                            >
-                              {headers.composer.visible && !headers.composer.removed
-                                ? 'Ocultar'
-                                : 'Mostrar'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  composer: { ...h.composer, removed: !h.composer.removed },
-                                }))
-                              }
-                              className="p-1 rounded bg-red-950/60 text-red-300"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                        <input
-                          type="text"
-                          disabled={headers.composer.removed}
-                          value={
-                            headers.composer.autoSyncInstrument
-                              ? activePartLabelInTopBar
-                              : headers.composer.text
-                          }
-                          onChange={(e) =>
-                            setHeaders((h) => ({
-                              ...h,
-                              composer: {
-                                ...h.composer,
-                                text: e.target.value,
-                                autoSyncInstrument: false,
-                              },
-                            }))
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                        />
-                      </div>
-
-                      {/* Letrista / Indicador Tom para Piano */}
-                      <div className="space-y-1">
-                        <div className="flex items-center justify-between">
-                          <label className="font-semibold text-zinc-300">
-                            Tom para Piano (Canto Sup. Esquerdo):
-                          </label>
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  lyricist: {
-                                    ...h.lyricist,
-                                    autoSyncPianoKey: !h.lyricist.autoSyncPianoKey,
-                                  },
-                                }))
-                              }
-                              className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 ${
-                                headers.lyricist.autoSyncPianoKey
-                                  ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
-                                  : 'bg-zinc-800 text-zinc-400'
-                              }`}
-                            >
-                              <RefreshCw className="w-2.5 h-2.5" />
-                              Auto Tom
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  lyricist: {
-                                    ...h.lyricist,
-                                    visible: !h.lyricist.visible,
-                                    removed: false,
-                                  },
-                                }))
-                              }
-                              className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
-                            >
-                              {headers.lyricist.visible && !headers.lyricist.removed
-                                ? 'Ocultar'
-                                : 'Mostrar'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setHeaders((h) => ({
-                                  ...h,
-                                  lyricist: { ...h.lyricist, removed: !h.lyricist.removed },
-                                }))
-                              }
-                              className="p-1 rounded bg-red-950/60 text-red-300"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                        <input
-                          type="text"
-                          disabled={headers.lyricist.removed}
-                          value={
-                            headers.lyricist.autoSyncPianoKey
-                              ? `Tom para Piano: ${currentConcertTonality.majorName}`
-                              : headers.lyricist.text
-                          }
-                          onChange={(e) =>
-                            setHeaders((h) => ({
-                              ...h,
-                              lyricist: {
-                                ...h.lyricist,
-                                text: e.target.value,
-                                autoSyncPianoKey: false,
-                              },
-                            }))
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                        />
-                      </div>
+                      <input
+                        type="text"
+                        disabled={headers.title.removed}
+                        value={headers.title.text}
+                        onChange={(e) => {
+                          scheduleScoreAction('header-title-text', 350);
+                          setHeaders((h) => ({
+                            ...h,
+                            title: { ...h.title, text: e.target.value },
+                          }));
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
+                      />
                     </div>
+
+                    {/* Subtítulo */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-zinc-300">Subtítulo:</label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-sub-vis', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                subtitle: {
+                                  ...h.subtitle,
+                                  visible: !h.subtitle.visible,
+                                  removed: false,
+                                },
+                              }));
+                            }}
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
+                          >
+                            {headers.subtitle.visible && !headers.subtitle.removed
+                              ? 'Ocultar'
+                              : 'Mostrar'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-sub-rm', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                subtitle: { ...h.subtitle, removed: !h.subtitle.removed },
+                              }));
+                            }}
+                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60"
+                            title="Remover Subtítulo"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        disabled={headers.subtitle.removed}
+                        placeholder="Ex: Artista / Cantor"
+                        value={headers.subtitle.text}
+                        onChange={(e) => {
+                          scheduleScoreAction('header-sub-text', 350);
+                          setHeaders((h) => ({
+                            ...h,
+                            subtitle: {
+                              ...h.subtitle,
+                              text: e.target.value,
+                              visible: true,
+                              removed: false,
+                            },
+                          }));
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
+                      />
+                    </div>
+
+                    {/* Compositor / Instrumento (Canto Superior Direito) */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-zinc-300">
+                          Instrumento (Canto Sup. Direito):
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-comp-auto', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                composer: {
+                                  ...h.composer,
+                                  autoSyncInstrument: !h.composer.autoSyncInstrument,
+                                },
+                              }));
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 ${
+                              headers.composer.autoSyncInstrument
+                                ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
+                                : 'bg-zinc-800 text-zinc-400'
+                            }`}
+                          >
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            Auto Pauta
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-comp-vis', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                composer: {
+                                  ...h.composer,
+                                  visible: !h.composer.visible,
+                                  removed: false,
+                                },
+                              }));
+                            }}
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
+                          >
+                            {headers.composer.visible && !headers.composer.removed
+                              ? 'Ocultar'
+                              : 'Mostrar'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-comp-rm', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                composer: { ...h.composer, removed: !h.composer.removed },
+                              }));
+                            }}
+                            className="p-1 rounded bg-red-950/60 text-red-300"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        disabled={headers.composer.removed}
+                        value={
+                          headers.composer.autoSyncInstrument
+                            ? activePartLabelInTopBar
+                            : headers.composer.text
+                        }
+                        onChange={(e) => {
+                          scheduleScoreAction('header-comp-text', 350);
+                          setHeaders((h) => ({
+                            ...h,
+                            composer: {
+                              ...h.composer,
+                              text: e.target.value,
+                              autoSyncInstrument: false,
+                            },
+                          }));
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
+                      />
+                    </div>
+
+                    {/* Letrista / Indicador Tom para Piano */}
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="font-semibold text-zinc-300">
+                          Tom para Piano (Canto Sup. Esquerdo):
+                        </label>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-lyr-auto', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                lyricist: {
+                                  ...h.lyricist,
+                                  autoSyncPianoKey: !h.lyricist.autoSyncPianoKey,
+                                },
+                              }));
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 ${
+                              headers.lyricist.autoSyncPianoKey
+                                ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
+                                : 'bg-zinc-800 text-zinc-400'
+                            }`}
+                          >
+                            <RefreshCw className="w-2.5 h-2.5" />
+                            Auto Tom
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-lyr-vis', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                lyricist: {
+                                  ...h.lyricist,
+                                  visible: !h.lyricist.visible,
+                                  removed: false,
+                                },
+                              }));
+                            }}
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300"
+                          >
+                            {headers.lyricist.visible && !headers.lyricist.removed
+                              ? 'Ocultar'
+                              : 'Mostrar'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              scheduleScoreAction('header-lyr-rm', 120);
+                              setHeaders((h) => ({
+                                ...h,
+                                lyricist: { ...h.lyricist, removed: !h.lyricist.removed },
+                              }));
+                            }}
+                            className="p-1 rounded bg-red-950/60 text-red-300"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        disabled={headers.lyricist.removed}
+                        value={
+                          headers.lyricist.autoSyncPianoKey
+                            ? `Tom para Piano: ${currentConcertTonality.majorName}`
+                            : headers.lyricist.text
+                        }
+                        onChange={(e) => {
+                          scheduleScoreAction('header-lyr-text', 350);
+                          setHeaders((h) => ({
+                            ...h,
+                            lyricist: {
+                              ...h.lyricist,
+                              text: e.target.value,
+                              autoSyncPianoKey: false,
+                            },
+                          }));
+                        }}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
+                      />
+                    </div>
+                  </div>
                 </div>
               </section>
 
-              {/* 4. PAUTAS INTERNAS (.MSCZ) — SELEÇÃO E EXTRAÇÃO DE PARTES OCULTAS */}
+              {/* 4. NOVO PAINEL: TAMANHO DA PAUTA (ESCALA VETORIAL <Spatium>) */}
+              <section
+                className={`${
+                  mobileTab === 'layout' ? 'block' : 'hidden lg:block'
+                } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-3 text-xs`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
+                    <Scaling className="w-4 h-4" />
+                    <span>Tamanho da Pauta (Escala)</span>
+                  </h2>
+                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-sax-500/15 text-sax-300 border border-sax-500/30 font-bold">
+                    {staffScalePercent}% (
+                    {((analysis.originalSpatium * staffScalePercent) / 100).toFixed(2)} mm)
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-zinc-400">
+                  Reduza ou amplie a escala das pautas para encaixar linhas órfãs sem diminuir os
+                  textos do cabeçalho.
+                </p>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    disabled={isSvgLoading && activeActionId === 'scale-down'}
+                    onClick={() =>
+                      handleChangeStaffScale(staffScalePercent - 5, 'scale-down', 180)
+                    }
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                      isProcessing && activeActionId === 'scale-down'
+                        ? 'bg-[#D97706] text-studio-950 border-sax-400'
+                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                    }`}
+                  >
+                    {isProcessing && activeActionId === 'scale-down' && (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    )}
+                    <span>- 5%</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isSvgLoading && activeActionId === 'scale-reset'}
+                    onClick={() => handleChangeStaffScale(100, 'scale-reset', 40)}
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                      staffScalePercent === 100
+                        ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
+                    }`}
+                  >
+                    {isProcessing && activeActionId === 'scale-reset' && (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    )}
+                    <span>100% (Original)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isSvgLoading && activeActionId === 'scale-up'}
+                    onClick={() =>
+                      handleChangeStaffScale(staffScalePercent + 5, 'scale-up', 180)
+                    }
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                      isProcessing && activeActionId === 'scale-up'
+                        ? 'bg-[#D97706] text-studio-950 border-sax-400'
+                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                    }`}
+                  >
+                    {isProcessing && activeActionId === 'scale-up' && (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    )}
+                    <span>+ 5%</span>
+                  </button>
+                </div>
+
+                {/* Pílulas de atalho direto */}
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {STAFF_SCALE_PILLS.map((pct) => {
+                    const actionId = `scale-pill-${pct}`;
+                    const isSelected = staffScalePercent === pct;
+                    const isSpinning = isProcessing && activeActionId === actionId;
+                    return (
+                      <button
+                        key={pct}
+                        type="button"
+                        disabled={isSvgLoading && activeActionId === actionId}
+                        onClick={() => handleChangeStaffScale(pct, actionId, 40)}
+                        className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border inline-flex items-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                          isSelected
+                            ? 'bg-[#D97706] text-studio-950 border-sax-400 shadow-sm'
+                            : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
+                        }`}
+                      >
+                        {isSpinning && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
+                        <span>{pct}%</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* 5. NOVO PAINEL: QUEBRA DE COMPASSO (QUEBRA DE SISTEMA NO XML) */}
+              <section
+                className={`${
+                  mobileTab === 'layout' ? 'block' : 'hidden lg:block'
+                } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-3 text-xs`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
+                    <SplitSquareVertical className="w-4 h-4" />
+                    <span>Quebra de Compasso (Sistema)</span>
+                  </h2>
+                  <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                    {lineBreakMeasures.length === 0
+                      ? 'Automático'
+                      : `${lineBreakMeasures.length} quebras`}
+                  </span>
+                </div>
+
+                {/* Opção 1 — Automático (Remover todas as quebras) */}
+                <button
+                  type="button"
+                  disabled={isSvgLoading && activeActionId === 'break-auto'}
+                  onClick={handleAutoSystemBreaks}
+                  className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                    systemBreakMode === 'auto' && lineBreakMeasures.length === 0
+                      ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
+                  }`}
+                >
+                  {isProcessing && activeActionId === 'break-auto' && (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  )}
+                  <span>Automático (Padrão do Motor)</span>
+                </button>
+
+                {/* Opção 2 — Quebra a cada X compassos */}
+                <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[11px] font-semibold text-zinc-300">
+                      Compassos por linha (1 a 12):
+                    </label>
+                    <select
+                      value={measuresPerLineInput}
+                      onChange={(e) =>
+                        setMeasuresPerLineInput(parseInt(e.target.value, 10) || 4)
+                      }
+                      className="px-2.5 py-1 rounded-lg bg-studio-950 border border-zinc-700 text-xs font-mono font-bold text-sax-300 focus:outline-none focus:border-sax-500"
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((num) => (
+                        <option key={num} value={num}>
+                          {num} {num === 1 ? 'compasso' : 'compassos'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isSvgLoading && activeActionId === 'break-every-x'}
+                    onClick={handleApplyEveryXMeasures}
+                    className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation ${
+                      systemBreakMode === 'every-x'
+                        ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                    }`}
+                  >
+                    {isProcessing && activeActionId === 'break-every-x' && (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    )}
+                    <span>Aplicar a cada {measuresPerLineInput} compassos</span>
+                  </button>
+                </div>
+
+                {/* Opção 3 — Aplicar Quebra em Compasso Específico (Grade Interativa) */}
+                {analysis.measureCount > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] text-zinc-400 leading-snug">
+                      Clique no número do compasso para ativar/desativar uma quebra de linha após
+                      ele:
+                    </p>
+                    <div className="max-h-40 overflow-y-auto grid grid-cols-6 sm:grid-cols-8 gap-1 p-1.5 rounded-xl bg-zinc-900/90 border border-zinc-800">
+                      {Array.from({ length: analysis.measureCount }, (_, idx) => {
+                        const mNum = idx + 1;
+                        const hasBreak = lineBreakMeasures.includes(mNum);
+                        const actionId = `break-measure-${mNum}`;
+                        const isSpinning = isProcessing && activeActionId === actionId;
+                        return (
+                          <button
+                            key={mNum}
+                            type="button"
+                            disabled={isSvgLoading && activeActionId === actionId}
+                            onClick={() => handleToggleMeasureBreak(mNum)}
+                            className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-95 transition-transform duration-75 touch-manipulation ${
+                              hasBreak
+                                ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                                : 'bg-studio-950 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
+                            }`}
+                            title={
+                              hasBreak
+                                ? `Remover quebra de linha após o compasso ${mNum}`
+                                : `Inserir quebra de linha após o compasso ${mNum}`
+                            }
+                          >
+                            {isSpinning ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              mNum
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </section>
+
+              {/* 6. PAUTAS INTERNAS (.MSCZ) — SEM O AVISO INFERIOR DE RODAPÉ BLINDADO */}
               <section
                 className={`${
                   mobileTab === 'staves' ? 'block' : 'hidden lg:block'
@@ -1775,20 +2366,25 @@ export default function RubsaxWorkspace() {
                       viewMode !== 'full-score' &&
                       selectedStaffIds.length === 1 &&
                       selectedStaffIds[0] === st.staffId;
+                    const toggleActionId = `staff-toggle-${st.staffId}`;
+                    const soloActionId = `staff-solo-${st.staffId}`;
+                    const isToggling = isProcessing && activeActionId === toggleActionId;
+                    const isSoloing = isProcessing && activeActionId === soloActionId;
 
                     return (
                       <div
                         key={st.staffId}
                         className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
                           isActiveInSelection
-                            ? 'bg-sax-500/15 border-sax-500/60 text-white shadow-sm'
+                            ? 'bg-sax-500/20 border-sax-500 text-white shadow-sm'
                             : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
                         }`}
                       >
                         <button
                           type="button"
+                          disabled={isSvgLoading && activeActionId === toggleActionId}
                           onClick={() => handleToggleStaffActive(st.staffId)}
-                          className="flex items-center gap-2.5 flex-1 text-left truncate"
+                          className="flex items-center gap-2.5 flex-1 text-left truncate active:scale-[0.98] transition-transform duration-75 touch-manipulation"
                           title={
                             isActiveInSelection
                               ? 'Clique para ocultar esta pauta'
@@ -1798,11 +2394,15 @@ export default function RubsaxWorkspace() {
                           <span
                             className={`w-4 h-4 rounded flex items-center justify-center border shrink-0 transition ${
                               isActiveInSelection
-                                ? 'bg-sax-500 border-sax-400 text-studio-950'
+                                ? 'bg-[#D97706] border-sax-400 text-studio-950'
                                 : 'bg-zinc-950 border-zinc-600 text-transparent'
                             }`}
                           >
-                            <Check className="w-3 h-3 stroke-[3]" />
+                            {isToggling ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Check className="w-3 h-3 stroke-[3]" />
+                            )}
                           </span>
                           <span className="font-semibold text-xs truncate">
                             Pauta {st.staffId}: {st.displayName}
@@ -1811,15 +2411,17 @@ export default function RubsaxWorkspace() {
 
                         <button
                           type="button"
+                          disabled={isSvgLoading && activeActionId === soloActionId}
                           onClick={() => handleSelectSingleStaff(st.staffId)}
-                          className={`text-[10px] px-2 py-1 rounded-md font-bold shrink-0 transition ${
+                          className={`text-[10px] px-2 py-1 rounded-md font-bold shrink-0 inline-flex items-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation ${
                             isIsolatedOnly
-                              ? 'bg-sax-500 text-studio-950'
+                              ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
                               : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
                           }`}
                           title="Exibir apenas esta pauta isolada"
                         >
-                          {isIsolatedOnly ? 'Isolada' : 'Só esta'}
+                          {isSoloing && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
+                          <span>{isIsolatedOnly ? 'Isolada' : 'Só esta'}</span>
                         </button>
                       </div>
                     );
@@ -1828,15 +2430,24 @@ export default function RubsaxWorkspace() {
                   {analysis.staves.length > 1 && (
                     <button
                       type="button"
+                      disabled={isSvgLoading && activeActionId === 'view-full-score'}
                       onClick={() => handleChangeViewMode('full-score')}
-                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-left transition ${
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-left active:scale-[0.99] transition-transform duration-75 touch-manipulation ${
                         viewMode === 'full-score'
-                          ? 'bg-sax-500/15 border-sax-500/60 text-white shadow-sm'
+                          ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                           : 'bg-zinc-900/80 hover:bg-zinc-800/80 border-zinc-800 text-zinc-300'
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <FileText className="w-3.5 h-3.5 text-sax-400" />
+                        {isProcessing && activeActionId === 'view-full-score' ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <FileText
+                            className={`w-3.5 h-3.5 ${
+                              viewMode === 'full-score' ? 'text-studio-950' : 'text-sax-400'
+                            }`}
+                          />
+                        )}
                         <span className="font-semibold text-xs">
                           Grade Completa ({analysis.staves.length} pautas empilhadas)
                         </span>
@@ -1844,7 +2455,7 @@ export default function RubsaxWorkspace() {
                       <span
                         className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
                           viewMode === 'full-score'
-                            ? 'bg-sax-500 text-studio-950'
+                            ? 'bg-black/20 text-studio-950'
                             : 'bg-zinc-800 text-zinc-400'
                         }`}
                       >
@@ -1853,24 +2464,12 @@ export default function RubsaxWorkspace() {
                     </button>
                   )}
                 </div>
-
-                {/* Marca d'água obrigatória fixa */}
-                <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 flex items-center justify-between text-[11px] text-zinc-300">
-                  <span className="flex items-center gap-1.5 font-semibold">
-                    <Lock className="w-3.5 h-3.5 text-sax-400" />
-                    Rodapé: &ldquo;Rubsax Partituras&rdquo;
-                  </span>
-                  <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
-                    <Check className="w-3.5 h-3.5" />
-                    Blindado
-                  </span>
-                </div>
               </section>
             </div>
           </aside>
 
-          {/* ÁREA PRINCIPAL DE VISUALIZAÇÃO DA PARTITURA (Exclusivamente Motor Vetorial Fiel MuseScore SVG) */}
-          <main className="flex-1 flex flex-col overflow-hidden order-1 lg:order-2 min-h-[52vh]">
+          {/* ÁREA PRINCIPAL DE VISUALIZAÇÃO DA PARTITURA (Motor Vetorial MuseScore SVG) */}
+          <main className="flex-1 flex flex-col order-1 lg:order-2 min-h-[54vh] lg:h-[calc(100vh-68px)] overflow-hidden">
             {isLoadingFile ? (
               <div className="flex-1 flex flex-col items-center justify-center gap-3 p-8 text-zinc-400">
                 <Loader2 className="w-8 h-8 text-sax-400 animate-spin" />
@@ -1894,11 +2493,16 @@ export default function RubsaxWorkspace() {
                 renderVersion={renderVersion}
                 hasUnrenderedChanges={hasUnrenderedChanges}
                 onRequestPreview={handleTriggerPreview}
+                onLoadingChange={setIsSvgLoading}
+                activeActionId={activeActionId}
               />
             )}
           </main>
         </div>
       )}
+
+      {/* RODAPÉ INSTITUCIONAL COMPLETO E MODAIS LEGAIS */}
+      <EcosystemFooter />
 
       {/* MODAL OBRIGATÓRIO DE AVISO DE CIFRAS PARA INSTRUMENTOS EM SIB (Bb) E MIB (Eb) */}
       <BbEbChordModal
@@ -1909,17 +2513,11 @@ export default function RubsaxWorkspace() {
         writtenTonality={currentWrittenTonality}
         sampleChords={analysis?.sampleChords || []}
         onConfirmConvertToInstrument={() => {
-          setConvertBbEbChordsToWritten(true);
-          setShowBbEbModal(false);
-          if (analysis && originalMscx) {
-            const nextOpts: ScoreTransformOptions = {
-              ...screenTransformOptions,
-              convertBbEbChordsToWritten: true,
-            };
-            const res = transformScoreXml(originalMscx, analysis, nextOpts);
-            setRenderedSnapshotMscx(res.modifiedMscx);
-            setRenderVersion((v) => v + 1);
+          if (!convertBbEbChordsToWritten) {
+            scheduleScoreAction('chords-written', 30);
+            setConvertBbEbChordsToWritten(true);
           }
+          setShowBbEbModal(false);
         }}
         onKeepPianoConcertPitch={() => {
           setConvertBbEbChordsToWritten(false);
@@ -1967,8 +2565,8 @@ export default function RubsaxWorkspace() {
 
             <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-2">
               <p>
-                Você fez alterações nos controles que ainda não foram aplicadas na visualização da
-                partitura. O que deseja fazer?
+                Você fez alterações nos controles que ainda não terminaram de ser aplicadas na
+                visualização da partitura. O que deseja fazer?
               </p>
             </div>
 

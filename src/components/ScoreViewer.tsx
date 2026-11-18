@@ -1,20 +1,19 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { FloatingTextBox, ScoreLayoutViewMode } from '@/lib/music/mscz-engine';
 import {
-  ZoomIn,
-  ZoomOut,
-  RotateCcw,
   Lock,
   Loader2,
   AlertTriangle,
   FileText,
-  AlignJustify,
   Layers,
   RefreshCw,
   Move,
-  Ban,
+  Maximize2,
+  ChevronLeft,
+  ChevronRight,
+  X,
 } from 'lucide-react';
 
 export type CanvasThemeMode = 'parchment' | 'white';
@@ -32,6 +31,8 @@ interface ScoreViewerProps {
   renderVersion: number;
   hasUnrenderedChanges: boolean;
   onRequestPreview: () => void;
+  onLoadingChange?: (loading: boolean) => void;
+  activeActionId?: string | null;
 }
 
 interface DragState {
@@ -54,21 +55,31 @@ export default function ScoreViewer({
   renderVersion,
   hasUnrenderedChanges,
   onRequestPreview,
+  onLoadingChange,
+  activeActionId,
 }: ScoreViewerProps) {
-  const [zoom, setZoom] = useState<number>(100);
   const [svgPages, setSvgPages] = useState<string[]>([]);
   const [svgLoading, setSvgLoading] = useState<boolean>(false);
   const [svgError, setSvgError] = useState<string | null>(null);
   const [pageWidthPx, setPageWidthPx] = useState<number>(860);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [currentVisiblePage, setCurrentVisiblePage] = useState<number>(1);
 
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const viewerRootRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pageRefs = useRef<Record<number, HTMLDivElement | null>>({});
+
+  useEffect(() => {
+    onLoadingChange?.(svgLoading);
+  }, [svgLoading, onLoadingChange]);
 
   useEffect(() => {
     if (!modifiedMscx || !originalBase64) {
       return;
     }
 
+    const controller = new AbortController();
     let cancelled = false;
     setSvgLoading(true);
     setSvgError(null);
@@ -78,6 +89,7 @@ export default function ScoreViewer({
         const res = await fetch('/api/render-svg', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             originalBase64,
             fileName,
@@ -101,8 +113,9 @@ export default function ScoreViewer({
           })
         );
         setSvgPages(responsivePages);
+        setCurrentVisiblePage(1);
       } catch (err: unknown) {
-        if (cancelled) return;
+        if (cancelled || controller.signal.aborted) return;
         const msg =
           err instanceof Error ? err.message : 'Erro ao renderizar partitura via MuseScore 3.';
         setSvgError(msg);
@@ -111,11 +124,12 @@ export default function ScoreViewer({
           setSvgLoading(false);
         }
       }
-    }, 80);
+    }, 30);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
+      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renderVersion, fileName]);
@@ -134,7 +148,88 @@ export default function ScoreViewer({
     const observer = new ResizeObserver(updateWidth);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [svgPages, zoom, viewMode]);
+  }, [svgPages, viewMode, isFullscreen]);
+
+  const enterFullscreen = useCallback(async () => {
+    setIsFullscreen(true);
+    try {
+      const el = viewerRootRef.current;
+      if (el && el.requestFullscreen && !document.fullscreenElement) {
+        await el.requestFullscreen();
+      }
+    } catch {
+      // Fallback CSS fixed inset-0 z-50 continua ativo normalmente (ex: iOS Safari)
+    }
+  }, []);
+
+  const exitFullscreen = useCallback(async () => {
+    setIsFullscreen(false);
+    try {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Ignora erro caso já tenha saído da Fullscreen API
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        void exitFullscreen();
+      }
+    };
+
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        setIsFullscreen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+    };
+  }, [isFullscreen, exitFullscreen]);
+
+  const handleScrollTrackPage = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container || svgPages.length <= 1) {
+      setCurrentVisiblePage(1);
+      return;
+    }
+
+    const containerTop = container.getBoundingClientRect().top;
+    let closestPage = 1;
+    let minDistance = Infinity;
+
+    for (let i = 0; i < svgPages.length; i++) {
+      const pEl = pageRefs.current[i];
+      if (!pEl) continue;
+      const dist = Math.abs(pEl.getBoundingClientRect().top - containerTop - 24);
+      if (dist < minDistance) {
+        minDistance = dist;
+        closestPage = i + 1;
+      }
+    }
+    setCurrentVisiblePage(closestPage);
+  }, [svgPages.length]);
+
+  const scrollToPage = useCallback(
+    (targetPageOneBased: number) => {
+      const clamped = Math.max(1, Math.min(svgPages.length || 1, targetPageOneBased));
+      setCurrentVisiblePage(clamped);
+      const el = pageRefs.current[clamped - 1];
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    },
+    [svgPages.length]
+  );
 
   const updateDragPosition = (clientX: number, clientY: number, currentDrag: DragState) => {
     const container = pageRefs.current[currentDrag.pageIdx];
@@ -225,13 +320,25 @@ export default function ScoreViewer({
       ? 'bg-[#F4E8C1] text-stone-900 border-amber-900/20'
       : 'bg-white text-slate-900 border-slate-300';
 
-  const baseMaxWidth = 900;
+  const isSwitchingToPortrait = svgLoading && activeActionId === 'view-portrait';
+  const isSwitchingToFullScore = svgLoading && activeActionId === 'view-full-score';
 
   return (
-    <div className="flex flex-col h-full w-full relative">
-      {/* OVERLAY CENTRALIZADO E GRANDE DE CARREGAMENTO ("APLICANDO ALTERAÇÕES...") */}
+    <div
+      ref={viewerRootRef}
+      className={
+        isFullscreen
+          ? 'fixed inset-0 z-50 bg-[#0b0f19] flex flex-col w-full h-full'
+          : 'flex flex-col h-full w-full relative'
+      }
+    >
+      {/* OVERLAY CENTRALIZADO NA ÁREA DA PARTITURA ("APLICANDO ALTERAÇÕES...") */}
       {svgLoading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm animate-fadeIn">
+        <div
+          className={`${
+            isFullscreen ? 'fixed' : 'absolute'
+          } inset-0 z-40 flex items-center justify-center p-4 bg-black/65 backdrop-blur-sm animate-fadeIn`}
+        >
           <div className="w-full max-w-md p-6 sm:p-8 rounded-2xl bg-studio-900 border-2 border-sax-500/60 shadow-2xl flex flex-col items-center text-center gap-4">
             <div className="w-16 h-16 rounded-2xl bg-sax-500/15 border border-sax-500/40 flex items-center justify-center">
               <Loader2 className="w-10 h-10 text-sax-400 animate-spin" />
@@ -249,132 +356,193 @@ export default function ScoreViewer({
         </div>
       )}
 
-      {/* Barra Superior do Visualizador: Vertical (Paginado), Vertical Contínua, Grade Completa */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-studio-900/95 border-b border-zinc-800 text-xs">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-zinc-400 font-semibold hidden xl:inline mr-1">
-            Modo de Exibição:
-          </span>
-
-          <button
-            type="button"
-            onClick={() => onViewModeChange('portrait')}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold transition ${
-              viewMode === 'portrait'
-                ? 'bg-sax-500 text-studio-950 shadow-sm font-bold'
-                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-            }`}
-            title="Visualização padrão paginada em A4 vertical"
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>Vertical (Paginado)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onViewModeChange('continuous-vertical')}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold transition ${
-              viewMode === 'continuous-vertical'
-                ? 'bg-sax-500 text-studio-950 shadow-sm font-bold'
-                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-            }`}
-            title="Leitura vertical contínua sem quebras ou separação por páginas (PDF desativado neste modo)"
-          >
-            <AlignJustify className="w-3.5 h-3.5" />
-            <span>Vertical Contínua</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onViewModeChange('full-score')}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold transition ${
-              viewMode === 'full-score'
-                ? 'bg-sax-500 text-studio-950 shadow-sm font-bold'
-                : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-            }`}
-            title="Exibe todas as pautas do arquivo simultaneamente empilhadas no mesmo sistema"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Grade Completa (Pautas Empilhadas)</span>
-          </button>
-
-          {hasUnrenderedChanges && (
+      {/* Barra Superior Flutuante Compacta no MODO TELA CHEIA vs Barra Normal */}
+      {isFullscreen ? (
+        <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-5 py-2.5 bg-studio-900/95 backdrop-blur-md border-b border-zinc-800 shadow-lg text-xs">
+          {/* Paginação */}
+          <div className="flex items-center gap-1.5 bg-zinc-800/90 rounded-lg px-2 py-1 border border-zinc-700">
             <button
               type="button"
-              onClick={onRequestPreview}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold shadow-md animate-pulse transition"
+              disabled={currentVisiblePage <= 1}
+              onClick={() => scrollToPage(currentVisiblePage - 1)}
+              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-95 transition-transform duration-75 touch-manipulation"
+              title="Página Anterior"
             >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Aplicar Alterações</span>
+              <ChevronLeft className="w-4 h-4" />
             </button>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Seletor de Fundo: Pergaminho Clássico vs Branco Impressão */}
-          <div className="flex items-center bg-zinc-800 rounded-lg p-0.5 border border-zinc-700">
+            <span className="font-bold text-zinc-100 px-1.5 whitespace-nowrap">
+              Página {Math.min(currentVisiblePage, svgPages.length || 1)} de {svgPages.length || 1}
+            </span>
             <button
               type="button"
-              onClick={() => onThemeChange('parchment')}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${
-                canvasTheme === 'parchment'
-                  ? 'bg-[#F4E8C1] text-stone-900 font-bold shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
+              disabled={currentVisiblePage >= (svgPages.length || 1)}
+              onClick={() => scrollToPage(currentVisiblePage + 1)}
+              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-95 transition-transform duration-75 touch-manipulation"
+              title="Próxima Página"
             >
-              Pergaminho
-            </button>
-            <button
-              type="button"
-              onClick={() => onThemeChange('white')}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition ${
-                canvasTheme === 'white'
-                  ? 'bg-white text-slate-900 font-bold shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              Branco
+              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
 
-          {/* Controles de Zoom */}
-          <div className="flex items-center gap-1 bg-zinc-800 rounded-lg px-1.5 py-0.5 border border-zinc-700">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Seletor Pergaminho | Branco */}
+            <div className="flex items-center bg-zinc-800 rounded-lg p-0.5 border border-zinc-700">
+              <button
+                type="button"
+                onClick={() => onThemeChange('parchment')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                  canvasTheme === 'parchment'
+                    ? 'bg-[#F4E8C1] text-stone-900 font-bold shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Pergaminho
+              </button>
+              <button
+                type="button"
+                onClick={() => onThemeChange('white')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                  canvasTheme === 'white'
+                    ? 'bg-white text-slate-900 font-bold shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Branco
+              </button>
+            </div>
+
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.max(50, z - 15))}
-              className="p-1 text-zinc-300 hover:text-sax-400 transition"
-              title="Diminuir Zoom"
+              onClick={() => void exitFullscreen()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/90 hover:bg-red-500 text-white font-bold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              title="Sair da Tela Cheia (ESC)"
             >
-              <ZoomOut className="w-3.5 h-3.5" />
-            </button>
-            <span className="text-zinc-200 font-mono min-w-[40px] text-center">{zoom}%</span>
-            <button
-              type="button"
-              onClick={() => setZoom((z) => Math.min(200, z + 15))}
-              className="p-1 text-zinc-300 hover:text-sax-400 transition"
-              title="Aumentar Zoom"
-            >
-              <ZoomIn className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setZoom(100)}
-              className="p-1 text-zinc-400 hover:text-zinc-200 transition"
-              title="Resetar Zoom (100%)"
-            >
-              <RotateCcw className="w-3 h-3" />
+              <X className="w-3.5 h-3.5" />
+              <span>Sair da Tela Cheia</span>
             </button>
           </div>
         </div>
-      </div>
+      ) : (
+        /* Barra Superior Limpa do Visualizador: Vertical (Paginado), Grade Completa, Pergaminho/Branco e Tela Cheia */
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-studio-900/95 border-b border-zinc-800 text-xs">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-zinc-400 font-semibold hidden xl:inline mr-1">
+              Modo de Exibição:
+            </span>
+
+            <button
+              type="button"
+              disabled={svgLoading && viewMode === 'portrait'}
+              onClick={() => {
+                if (viewMode === 'portrait' && svgLoading) return;
+                onViewModeChange('portrait');
+              }}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation ${
+                viewMode === 'portrait'
+                  ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
+                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+              }`}
+              title="Visualização padrão paginada em A4 vertical"
+            >
+              {isSwitchingToPortrait ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FileText className="w-3.5 h-3.5" />
+              )}
+              <span>Vertical (Paginado)</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={svgLoading && viewMode === 'full-score'}
+              onClick={() => {
+                if (viewMode === 'full-score' && svgLoading) return;
+                onViewModeChange('full-score');
+              }}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation ${
+                viewMode === 'full-score'
+                  ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
+                  : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+              }`}
+              title="Exibe todas as pautas do arquivo simultaneamente empilhadas no mesmo sistema"
+            >
+              {isSwitchingToFullScore ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Layers className="w-3.5 h-3.5" />
+              )}
+              <span>Grade Completa (Pautas Empilhadas)</span>
+            </button>
+
+            {hasUnrenderedChanges && (
+              <button
+                type="button"
+                onClick={onRequestPreview}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
+              >
+                {svgLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                <span>Aplicar Alterações</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Seletor de Fundo: Pergaminho Clássico vs Branco Impressão */}
+            <div className="flex items-center bg-zinc-800 rounded-lg p-0.5 border border-zinc-700">
+              <button
+                type="button"
+                onClick={() => onThemeChange('parchment')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                  canvasTheme === 'parchment'
+                    ? 'bg-[#F4E8C1] text-stone-900 font-bold shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Pergaminho
+              </button>
+              <button
+                type="button"
+                onClick={() => onThemeChange('white')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                  canvasTheme === 'white'
+                    ? 'bg-white text-slate-900 font-bold shadow-sm'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                Branco
+              </button>
+            </div>
+
+            {/* Botão Destacado de Tela Cheia (Expandir Visor) */}
+            <button
+              type="button"
+              onClick={() => void enterFullscreen()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500/20 hover:bg-sax-500/30 border border-sax-500/50 text-sax-300 font-bold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              title="Expandir Visor para Tela Cheia"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-sax-400" />
+              <span>Tela Cheia</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Área Central da Partitura (Scrollable, 100% Fiel MuseScore SVG) */}
-      <div className="flex-1 overflow-auto p-2 sm:p-5 bg-studio-950/90 flex flex-col items-center">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScrollTrackPage}
+        className={`flex-1 overflow-auto p-2 sm:p-5 flex flex-col items-center ${
+          isFullscreen ? 'bg-[#0b0f19]' : 'bg-studio-950/90'
+        }`}
+      >
         <div
-          className="w-full flex flex-col items-center gap-5 transition-all"
-          style={{
-            maxWidth: `${Math.round((baseMaxWidth * zoom) / 100)}px`,
-          }}
+          className={`w-full flex flex-col items-center gap-5 transition-all ${
+            isFullscreen ? 'max-w-[960px]' : 'max-w-[900px]'
+          }`}
         >
           {svgError && (
             <div className="w-full max-w-xl p-4 rounded-xl bg-red-950/70 border border-red-500/40 text-red-100 text-xs flex flex-col gap-2.5">
@@ -385,7 +553,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={onRequestPreview}
-                className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500 text-studio-950 font-bold hover:bg-sax-400 transition"
+                className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500 text-studio-950 font-bold hover:bg-sax-400 active:scale-95 transition-transform duration-75 touch-manipulation"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Tentar Novamente</span>
@@ -393,95 +561,52 @@ export default function ScoreViewer({
             </div>
           )}
 
-          {/* MODO VERTICAL CONTÍNUA: Folha única contínua sem separação ou quebra de páginas */}
-          {viewMode === 'continuous-vertical' && svgPages.length > 0 ? (
-            <div
-              className={`w-full rounded-xl shadow-2xl border overflow-hidden relative transition-colors ${bgClass}`}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-[11px] border-b border-black/10 bg-black/[0.04]">
-                <span className="font-semibold flex items-center gap-1.5 opacity-85">
-                  <AlignJustify className="w-3.5 h-3.5" />
-                  Modo Vertical Contínua — Leitura corrida sem separação por páginas
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/15 border border-amber-900/20 font-semibold text-[10px]">
-                  <Ban className="w-3 h-3" />
-                  Exportação PDF desativada neste modo
-                </span>
-              </div>
+          {/* MODO PAGINADO (Vertical Retrato ou Grade Completa) */}
+          {svgPages.map((svgHtml, idx) => {
+            const pageFloatingTexts = floatingTexts.filter(
+              (ft) => (ft.pageIndex || 0) === idx && ft.text.trim()
+            );
 
+            return (
               <div
-                ref={(el) => {
-                  pageRefs.current[0] = el;
-                }}
-                className="w-full select-none relative flex flex-col"
+                key={idx}
+                className={`w-full rounded-xl shadow-2xl border overflow-hidden relative transition-colors ${bgClass}`}
               >
-                {svgPages.map((svgHtml, idx) => (
-                  <div
-                    key={idx}
-                    className={idx > 0 ? '-mt-4 sm:-mt-8' : ''}
-                    dangerouslySetInnerHTML={{ __html: svgHtml }}
-                  />
-                ))}
-
-                {renderFloatingOverlayBoxes(0, floatingTexts)}
-              </div>
-
-              {/* Marca d'Água Obrigatória Fixa apenas ao final da leitura contínua */}
-              <div className="px-4 py-2 border-t border-black/10 bg-black/[0.04] flex items-center justify-between text-[11px] select-none pointer-events-none">
-                <span className="font-semibold tracking-wide flex items-center gap-1.5">
-                  <Lock className="w-3 h-3" />© Rubsax Partituras — Direitos Autorais Protegidos
-                </span>
-                <span className="opacity-75 font-mono text-[10px]">rubsax.com.br</span>
-              </div>
-            </div>
-          ) : (
-            /* MODO PAGINADO (Vertical Retrato ou Grade Completa) */
-            svgPages.map((svgHtml, idx) => {
-              const pageFloatingTexts = floatingTexts.filter(
-                (ft) => (ft.pageIndex || 0) === idx && ft.text.trim()
-              );
-
-              return (
-                <div
-                  key={idx}
-                  className={`w-full rounded-xl shadow-2xl border overflow-hidden relative transition-colors ${bgClass}`}
-                >
-                  {/* Selo discreto de página */}
-                  <div className="flex items-center justify-between px-4 py-1.5 text-[11px] border-b border-black/10 bg-black/[0.03]">
-                    <span className="font-medium opacity-75">
-                      Página {idx + 1} de {svgPages.length}
-                    </span>
-                    <span className="inline-flex items-center gap-1 font-semibold opacity-80">
-                      <Lock className="w-3 h-3" />
-                      Rubsax Partituras
-                    </span>
-                  </div>
-
-                  {/* Superfície exata A4 sem padding para alinhamento 1:1 com coordenadas em mm do PDF */}
-                  <div
-                    ref={(el) => {
-                      pageRefs.current[idx] = el;
-                    }}
-                    className="w-full select-none relative"
-                  >
-                    <div dangerouslySetInnerHTML={{ __html: svgHtml }} />
-
-                    {renderFloatingOverlayBoxes(idx, pageFloatingTexts)}
-                  </div>
-
-                  {/* Marca d'Água Obrigatória Fixa e Imutável na Tela */}
-                  <div className="px-4 py-2 border-t border-black/10 bg-black/[0.04] flex items-center justify-between text-[11px] select-none pointer-events-none">
-                    <span className="font-semibold tracking-wide">
-                      © Rubsax Partituras — Direitos Autorais Protegidos
-                    </span>
-                    <span className="opacity-75 font-mono text-[10px]">
-                      rubsax.com.br
-                    </span>
-                  </div>
+                {/* Selo discreto de página */}
+                <div className="flex items-center justify-between px-4 py-1.5 text-[11px] border-b border-black/10 bg-black/[0.03]">
+                  <span className="font-medium opacity-75">
+                    Página {idx + 1} de {svgPages.length}
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-semibold opacity-80">
+                    <Lock className="w-3 h-3" />
+                    Rubsax Partituras
+                  </span>
                 </div>
-              );
-            })
-          )}
+
+                {/* Superfície exata A4 sem padding para alinhamento 1:1 com coordenadas em mm do PDF */}
+                <div
+                  ref={(el) => {
+                    pageRefs.current[idx] = el;
+                  }}
+                  className="w-full select-none relative"
+                >
+                  <div dangerouslySetInnerHTML={{ __html: svgHtml }} />
+
+                  {renderFloatingOverlayBoxes(idx, pageFloatingTexts)}
+                </div>
+
+                {/* Marca d'Água Obrigatória Fixa e Imutável na Tela */}
+                <div className="px-4 py-2 border-t border-black/10 bg-black/[0.04] flex items-center justify-between text-[11px] select-none pointer-events-none">
+                  <span className="font-semibold tracking-wide">
+                    © Rubsax Partituras — Direitos Autorais Protegidos
+                  </span>
+                  <span className="opacity-75 font-mono text-[10px]">
+                    rubsax.com.br
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
