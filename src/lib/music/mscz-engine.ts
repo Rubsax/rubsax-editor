@@ -1102,6 +1102,10 @@ export function transformScoreXml(
 ): TransformResult {
   const parser = new DOMParser();
   const doc = parser.parseFromString(originalMscxContent, 'text/xml');
+  if (doc.documentElement && doc.documentElement.tagName === 'museScore') {
+    // Normaliza versão para 3.01 garantindo leitura tanto no MuseScore 3.2.3 (Linux) quanto 3.6.2 (Windows)
+    doc.documentElement.setAttribute('version', '3.01');
+  }
   const scoreEls = doc.getElementsByTagName('Score');
   const scoreEl = scoreEls.item(0);
   if (!scoreEl) {

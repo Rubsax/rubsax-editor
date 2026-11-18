@@ -70,20 +70,28 @@ export function ensureMuseScoreRuntimeDirs(): NodeJS.ProcessEnv {
     return { ...process.env };
   }
 
-  const dirs = ['/tmp/runtime-rubsax', '/tmp/fontconfig-cache', '/tmp/musescore-home'];
-  for (const dir of dirs) {
+  // QStandardPaths exige exatamente 0700 no XDG_RUNTIME_DIR
+  const runtimeDir = '/tmp/runtime-rubsax';
+  try {
+    fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
+    fs.chmodSync(runtimeDir, 0o700);
+  } catch {
+    // Ignora erro caso já exista com permissão do usuário
+  }
+
+  for (const dir of ['/tmp/fontconfig-cache', '/tmp/musescore-home']) {
     try {
       fs.mkdirSync(dir, { recursive: true, mode: 0o777 });
       fs.chmodSync(dir, 0o777);
     } catch {
-      // Ignora erro de chmod caso o diretório já exista com 777
+      // Ignora erro caso o diretório já exista com 777
     }
   }
 
   return {
     ...process.env,
     HOME: '/tmp/musescore-home',
-    XDG_RUNTIME_DIR: '/tmp/runtime-rubsax',
+    XDG_RUNTIME_DIR: runtimeDir,
     XDG_CACHE_HOME: '/tmp/fontconfig-cache',
     QT_QPA_PLATFORM: 'offscreen',
     LANG: 'C.UTF-8',
@@ -97,9 +105,11 @@ async function executeMuseScoreCommand(
 ): Promise<void> {
   const binPath = getMuseScoreBinPath();
   const childEnv = ensureMuseScoreRuntimeDirs();
+  // -f (--force) permite abrir partituras salvas no MuseScore 3.6.2 (3.02) no mscore3 3.2.3 (3.01)
+  const args = ['-f', '-o', outputPath, inputPath];
 
   if (process.platform === 'win32') {
-    await execFileAsync(binPath, ['-o', outputPath, inputPath], {
+    await execFileAsync(binPath, args, {
       timeout: 60000,
       windowsHide: true,
       env: childEnv,
@@ -109,7 +119,7 @@ async function executeMuseScoreCommand(
 
   // No Linux/Docker, tenta primeiro com QT_QPA_PLATFORM=offscreen direto no mscore3
   try {
-    await execFileAsync(binPath, ['-o', outputPath, inputPath], {
+    await execFileAsync(binPath, args, {
       timeout: 60000,
       env: childEnv,
     });
@@ -117,17 +127,13 @@ async function executeMuseScoreCommand(
   } catch (firstErr: unknown) {
     // Fallback para xvfb-run caso o ambiente exija servidor X virtual
     try {
-      await execFileAsync(
-        'xvfb-run',
-        ['-a', binPath, '-o', outputPath, inputPath],
-        {
-          timeout: 60000,
-          env: {
-            ...childEnv,
-            QT_QPA_PLATFORM: 'xcb',
-          },
-        }
-      );
+      await execFileAsync('xvfb-run', ['-a', binPath, ...args], {
+        timeout: 60000,
+        env: {
+          ...childEnv,
+          QT_QPA_PLATFORM: 'xcb',
+        },
+      });
       return;
     } catch {
       throw firstErr;

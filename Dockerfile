@@ -47,7 +47,8 @@ ENV MUSESCORE_BIN_PATH="mscore3"
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 nextjs \
     && mkdir -p /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home \
-    && chmod -R 777 /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home \
+    && chmod 700 /tmp/runtime-rubsax \
+    && chmod -R 777 /tmp/fontconfig-cache /tmp/musescore-home \
     && chown -R nextjs:nodejs /tmp/runtime-rubsax /tmp/fontconfig-cache /tmp/musescore-home
 
 COPY --from=builder /app/public ./public
