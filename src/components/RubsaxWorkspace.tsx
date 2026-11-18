@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   TONALITIES,
   getInstrumentById,
@@ -41,6 +41,7 @@ import {
   Edit3,
   Move,
   FileText,
+  Ban,
 } from 'lucide-react';
 
 type TransposeDirectionMode = 'closest' | 'up' | 'down';
@@ -77,7 +78,7 @@ export default function RubsaxWorkspace() {
     useState<TransposeDirectionMode>('closest');
   const [octaveShift, setOctaveShift] = useState<number>(0);
   const [targetInstrumentId, setTargetInstrumentId] = useState<string>('alto-sax');
-  const [selectedStaffId, setSelectedStaffId] = useState<string>('1');
+  const [selectedStaffIds, setSelectedStaffIds] = useState<string[]>(['1']);
   const [viewMode, setViewMode] = useState<ScoreLayoutViewMode>('portrait');
   const [convertBbEbChordsToWritten, setConvertBbEbChordsToWritten] =
     useState<boolean>(false);
@@ -105,6 +106,7 @@ export default function RubsaxWorkspace() {
   const [showHeaderEditorModal, setShowHeaderEditorModal] = useState<boolean>(false);
   const [renderVersion, setRenderVersion] = useState<number>(0);
   const [renderedSnapshotMscx, setRenderedSnapshotMscx] = useState<string>('');
+  const skipNextHeaderDebounceRef = useRef<boolean>(false);
 
   const loadScoreFromBuffer = useCallback(
     async (arrayBuf: ArrayBuffer, fileName: string) => {
@@ -163,6 +165,7 @@ export default function RubsaxWorkspace() {
           octaveShift: 0,
           targetInstrumentId: scoreAnalysis.detectedInstrumentId,
           selectedStaffId: firstStaffId,
+          selectedStaffIds: [firstStaffId],
           viewMode: 'portrait',
           convertBbEbChordsToWritten: false,
           showChords: true,
@@ -178,6 +181,7 @@ export default function RubsaxWorkspace() {
           initialOptions
         );
 
+        skipNextHeaderDebounceRef.current = true;
         setOriginalBase64(b64);
         setOriginalMscx(unpacked.mscxContent);
         setAnalysis(scoreAnalysis);
@@ -185,7 +189,7 @@ export default function RubsaxWorkspace() {
         setSemitoneShift(0);
         setOctaveShift(0);
         setTargetInstrumentId(scoreAnalysis.detectedInstrumentId);
-        setSelectedStaffId(firstStaffId);
+        setSelectedStaffIds([firstStaffId]);
         setViewMode('portrait');
         setConvertBbEbChordsToWritten(false);
         setShowChords(true);
@@ -249,7 +253,8 @@ export default function RubsaxWorkspace() {
       semitoneShift,
       octaveShift,
       targetInstrumentId,
-      selectedStaffId,
+      selectedStaffId: selectedStaffIds[0] || '1',
+      selectedStaffIds,
       viewMode,
       convertBbEbChordsToWritten,
       showChords,
@@ -262,7 +267,7 @@ export default function RubsaxWorkspace() {
       semitoneShift,
       octaveShift,
       targetInstrumentId,
-      selectedStaffId,
+      selectedStaffIds,
       viewMode,
       convertBbEbChordsToWritten,
       showChords,
@@ -296,14 +301,19 @@ export default function RubsaxWorkspace() {
     [targetInstrumentId]
   );
 
+  const selectedStavesList = useMemo(() => {
+    if (!analysis) return [];
+    const effectiveIds =
+      viewMode === 'full-score'
+        ? analysis.staves.map((s) => s.staffId)
+        : selectedStaffIds;
+    return analysis.staves.filter((s) => effectiveIds.includes(s.staffId));
+  }, [analysis, selectedStaffIds, viewMode]);
+
   const activeStaffSummary = useMemo(() => {
     if (!analysis) return null;
-    return (
-      analysis.staves.find((s) => s.staffId === selectedStaffId) ||
-      analysis.staves[0] ||
-      null
-    );
-  }, [analysis, selectedStaffId]);
+    return selectedStavesList[0] || analysis.staves[0] || null;
+  }, [analysis, selectedStavesList]);
 
   const currentConcertTonality =
     transformResult?.concertTonality ||
@@ -320,6 +330,28 @@ export default function RubsaxWorkspace() {
       renderedSnapshotMscx &&
       transformResult.modifiedMscx !== renderedSnapshotMscx
   );
+
+  // Atualização instantânea no visor quando o usuário edita, oculta ou remove textos do cabeçalho
+  useEffect(() => {
+    if (!analysis || !originalMscx) return;
+    if (skipNextHeaderDebounceRef.current) {
+      skipNextHeaderDebounceRef.current = false;
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try {
+        const res = transformScoreXml(originalMscx, analysis, screenTransformOptions);
+        setRenderedSnapshotMscx(res.modifiedMscx);
+        setRenderVersion((v) => v + 1);
+      } catch (err) {
+        console.error('Erro ao atualizar cabeçalho:', err);
+      }
+    }, 350);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headers]);
 
   const handleTriggerPreview = useCallback(() => {
     if (!transformResult) return;
@@ -340,8 +372,9 @@ export default function RubsaxWorkspace() {
     }
   };
 
-  const handleSelectStaffPart = (staffId: string) => {
-    setSelectedStaffId(staffId);
+  const handleSelectSingleStaff = (staffId: string) => {
+    const nextIds = [staffId];
+    setSelectedStaffIds(nextIds);
     const nextMode: ScoreLayoutViewMode =
       viewMode === 'full-score' ? 'portrait' : viewMode;
     setViewMode(nextMode);
@@ -350,6 +383,47 @@ export default function RubsaxWorkspace() {
       const nextOpts: ScoreTransformOptions = {
         ...screenTransformOptions,
         selectedStaffId: staffId,
+        selectedStaffIds: nextIds,
+        viewMode: nextMode,
+      };
+      const res = transformScoreXml(originalMscx, analysis, nextOpts);
+      setRenderedSnapshotMscx(res.modifiedMscx);
+      setRenderVersion((v) => v + 1);
+    }
+  };
+
+  const handleToggleStaffActive = (staffId: string) => {
+    if (!analysis) return;
+    const baseIds =
+      viewMode === 'full-score'
+        ? analysis.staves.map((s) => s.staffId)
+        : selectedStaffIds;
+
+    let nextIds: string[];
+    if (baseIds.includes(staffId)) {
+      if (baseIds.length <= 1) {
+        // Garante que pelo menos 1 pauta continue ativa
+        return;
+      }
+      nextIds = baseIds.filter((id) => id !== staffId);
+    } else {
+      // Preserva a ordem original das pautas no arquivo
+      nextIds = analysis.staves
+        .map((s) => s.staffId)
+        .filter((id) => baseIds.includes(id) || id === staffId);
+    }
+
+    const nextMode: ScoreLayoutViewMode =
+      viewMode === 'full-score' ? 'portrait' : viewMode;
+
+    setSelectedStaffIds(nextIds);
+    setViewMode(nextMode);
+
+    if (originalMscx) {
+      const nextOpts: ScoreTransformOptions = {
+        ...screenTransformOptions,
+        selectedStaffId: nextIds[0] || '1',
+        selectedStaffIds: nextIds,
         viewMode: nextMode,
       };
       const res = transformScoreXml(originalMscx, analysis, nextOpts);
@@ -381,8 +455,10 @@ export default function RubsaxWorkspace() {
     []
   );
 
+  const isPdfBlocked = viewMode === 'continuous-vertical';
+
   const handleExportPdf = async () => {
-    if (!analysis || !originalMscx || !originalBase64) return;
+    if (!analysis || !originalMscx || !originalBase64 || isPdfBlocked) return;
     setIsExportingPdf(true);
     setUploadError(null);
     try {
@@ -400,9 +476,15 @@ export default function RubsaxWorkspace() {
         .replace(/[<>:"/\\|?*]+/g, '')
         .trim();
 
+      const allStavesSelected =
+        analysis.staves.length > 1 &&
+        selectedStavesList.length === analysis.staves.length;
+
       const partLabel =
-        viewMode === 'full-score'
+        viewMode === 'full-score' || allStavesSelected
           ? 'Grade Completa'
+          : selectedStavesList.length > 1
+          ? selectedStavesList.map((s) => s.displayName).join(' + ')
           : pdfTransform.activeStaff.displayName;
 
       const customPdfName = `${cleanTitle} - ${partLabel} (${pdfTransform.writtenTonality.majorName}) - Rubsax.pdf`;
@@ -451,9 +533,16 @@ export default function RubsaxWorkspace() {
       ? 'Sib'
       : 'Mib';
 
+  const allStavesSelectedInUi =
+    Boolean(analysis) &&
+    analysis!.staves.length > 1 &&
+    selectedStavesList.length === analysis!.staves.length;
+
   const activePartLabelInTopBar =
-    viewMode === 'full-score'
+    viewMode === 'full-score' || allStavesSelectedInUi
       ? 'Grade Completa'
+      : selectedStavesList.length > 1
+      ? selectedStavesList.map((s) => s.displayName).join(' + ')
       : activeStaffSummary?.displayName || analysis?.detectedInstrumentName || activeInstrument.name;
 
   return (
@@ -490,7 +579,7 @@ export default function RubsaxWorkspace() {
                   RUBSAX <span className="text-sax-400">TRANSPOSER</span>
                 </h1>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                  v1.0
+                  v1.1
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 hidden sm:block">
@@ -548,20 +637,30 @@ export default function RubsaxWorkspace() {
                 }`}
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                <span className="hidden md:inline">Pré-visualizar Partitura</span>
-                <span className="md:hidden">Prévia</span>
+                <span>Aplicar Alterações</span>
               </button>
 
               <button
                 type="button"
-                disabled={isExportingPdf}
+                disabled={isExportingPdf || isPdfBlocked}
                 onClick={handleExportPdf}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-50 text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 transition"
+                title={
+                  isPdfBlocked
+                    ? 'Exportação PDF indisponível no modo Vertical Contínua. Volte para Vertical (Paginado) ou Grade Completa.'
+                    : 'Exportar PDF fiel pelo MuseScore 3'
+                }
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 transition"
               >
                 {isExportingPdf ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
                     <span>Gerando PDF...</span>
+                  </>
+                ) : isPdfBlocked ? (
+                  <>
+                    <Ban className="w-4 h-4" />
+                    <span className="hidden sm:inline">PDF Bloqueado (Contínuo)</span>
+                    <span className="sm:hidden">PDF Off</span>
                   </>
                 ) : (
                   <>
@@ -634,7 +733,7 @@ export default function RubsaxWorkspace() {
 
                 <div className="space-y-2 max-w-lg">
                   <span className="inline-block text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                    RUBSAX TRANSPOSER v1.0
+                    RUBSAX TRANSPOSER v1.1
                   </span>
                   <h2 className="text-xl sm:text-2xl font-extrabold text-white">
                     Envie sua Partitura para Começar
@@ -902,7 +1001,7 @@ export default function RubsaxWorkspace() {
                   </div>
                 </div>
 
-                {/* Dupla Ação Direta: Pré-visualizar Partitura ou Exportar PDF Direto */}
+                {/* Dupla Ação Direta: Aplicar Alterações ou Exportar PDF Direto */}
                 <div className="pt-2 border-t border-zinc-800/80 grid grid-cols-2 gap-2">
                   <button
                     type="button"
@@ -914,21 +1013,28 @@ export default function RubsaxWorkspace() {
                     }`}
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Pré-visualizar</span>
+                    <span>Aplicar Alterações</span>
                   </button>
 
                   <button
                     type="button"
-                    disabled={isExportingPdf}
+                    disabled={isExportingPdf || isPdfBlocked}
                     onClick={handleExportPdf}
-                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-extrabold shadow-md transition"
+                    title={
+                      isPdfBlocked
+                        ? 'PDF indisponível no modo Vertical Contínua'
+                        : 'Baixar PDF fiel'
+                    }
+                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md transition"
                   >
                     {isExportingPdf ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : isPdfBlocked ? (
+                      <Ban className="w-3.5 h-3.5" />
                     ) : (
                       <FileDown className="w-3.5 h-3.5" />
                     )}
-                    <span>Baixar PDF</span>
+                    <span>{isPdfBlocked ? 'PDF Off' : 'Baixar PDF'}</span>
                   </button>
                 </div>
               </section>
@@ -1213,10 +1319,13 @@ export default function RubsaxWorkspace() {
                     </button>
 
                     <div className="flex items-center gap-1.5">
+                      <span className="hidden lg:inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-semibold text-emerald-300">
+                        Atualização instantânea
+                      </span>
                       <button
                         type="button"
                         onClick={() => setShowHeaderEditorModal((v) => !v)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-sax-300 border border-zinc-700 transition"
+                        className="lg:hidden inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-sax-300 border border-zinc-700 transition"
                       >
                         <Type className="w-3.5 h-3.5" />
                         <span>{showHeaderEditorModal ? 'Fechar Editor' : 'Editar Cabeçalho'}</span>
@@ -1300,12 +1409,15 @@ export default function RubsaxWorkspace() {
                     </div>
                   )}
 
-                  {showHeaderEditorModal && (
-                    <div className="p-3 rounded-xl bg-zinc-900/95 border border-zinc-700 space-y-2.5 text-xs">
-                      <p className="text-[11px] text-zinc-400">
-                        Edite, oculte ou remova os textos de cabeçalho (fonte e tamanho originais
-                        permanecem travados):
-                      </p>
+                  <div
+                    className={`${
+                      showHeaderEditorModal ? 'block' : 'hidden lg:block'
+                    } p-3 rounded-xl bg-zinc-900/95 border border-zinc-700 space-y-2.5 text-xs`}
+                  >
+                    <p className="text-[11px] text-zinc-400">
+                      Edite, oculte ou remova os textos de cabeçalho (atualiza instantaneamente no
+                      visor; fonte e tamanho originais travados):
+                    </p>
 
                       {/* Título */}
                       <div className="space-y-1">
@@ -1481,10 +1593,7 @@ export default function RubsaxWorkspace() {
                           disabled={headers.composer.removed}
                           value={
                             headers.composer.autoSyncInstrument
-                              ? viewMode === 'full-score'
-                                ? 'Grade Completa'
-                                : activeStaffSummary?.headerInstrumentLabel ||
-                                  headers.composer.text
+                              ? activePartLabelInTopBar
                               : headers.composer.text
                           }
                           onChange={(e) =>
@@ -1582,7 +1691,6 @@ export default function RubsaxWorkspace() {
                         />
                       </div>
                     </div>
-                  )}
                 </div>
               </section>
 
@@ -1603,51 +1711,65 @@ export default function RubsaxWorkspace() {
                 </div>
 
                 <p className="text-[11px] text-zinc-400">
-                  Clique em qualquer pauta para visualizá-la individualmente (atualizando o
-                  instrumento no cabeçalho) e exportar seu PDF:
+                  Marque quais pautas deseja manter ativas simultaneamente na tela e no PDF (ou
+                  clique em &ldquo;Só esta&rdquo; para isolar uma única parte):
                 </p>
 
                 <div className="space-y-1.5">
                   {analysis.staves.map((st) => {
-                    const isSelectedPart =
-                      viewMode !== 'full-score' && selectedStaffId === st.staffId;
+                    const isActiveInSelection =
+                      viewMode === 'full-score' || selectedStaffIds.includes(st.staffId);
+                    const isIsolatedOnly =
+                      viewMode !== 'full-score' &&
+                      selectedStaffIds.length === 1 &&
+                      selectedStaffIds[0] === st.staffId;
+
                     return (
-                      <button
+                      <div
                         key={st.staffId}
-                        type="button"
-                        onClick={() => handleSelectStaffPart(st.staffId)}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-left transition ${
-                          isSelectedPart
+                        className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl border transition ${
+                          isActiveInSelection
                             ? 'bg-sax-500/15 border-sax-500/60 text-white shadow-sm'
-                            : 'bg-zinc-900/80 hover:bg-zinc-800/80 border-zinc-800 text-zinc-300'
+                            : 'bg-zinc-900/80 border-zinc-800 text-zinc-400'
                         }`}
                       >
-                        <div className="flex items-center gap-2 truncate">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleStaffActive(st.staffId)}
+                          className="flex items-center gap-2.5 flex-1 text-left truncate"
+                          title={
+                            isActiveInSelection
+                              ? 'Clique para ocultar esta pauta'
+                              : 'Clique para ativar esta pauta junto com as selecionadas'
+                          }
+                        >
                           <span
-                            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                              isSelectedPart
-                                ? 'bg-sax-400 ring-2 ring-sax-400/30'
-                                : 'bg-zinc-600'
+                            className={`w-4 h-4 rounded flex items-center justify-center border shrink-0 transition ${
+                              isActiveInSelection
+                                ? 'bg-sax-500 border-sax-400 text-studio-950'
+                                : 'bg-zinc-950 border-zinc-600 text-transparent'
                             }`}
-                          />
+                          >
+                            <Check className="w-3 h-3 stroke-[3]" />
+                          </span>
                           <span className="font-semibold text-xs truncate">
                             Pauta {st.staffId}: {st.displayName}
                           </span>
-                        </div>
-                        <span
-                          className={`text-[10px] px-2 py-0.5 rounded font-semibold shrink-0 ${
-                            isSelectedPart
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleSelectSingleStaff(st.staffId)}
+                          className={`text-[10px] px-2 py-1 rounded-md font-bold shrink-0 transition ${
+                            isIsolatedOnly
                               ? 'bg-sax-500 text-studio-950'
-                              : 'bg-zinc-800 text-zinc-400'
+                              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
                           }`}
+                          title="Exibir apenas esta pauta isolada"
                         >
-                          {isSelectedPart
-                            ? 'Ativa na Tela'
-                            : st.isPercussion
-                            ? 'Ver Parte (Percussão)'
-                            : 'Ver Parte'}
-                        </span>
-                      </button>
+                          {isIsolatedOnly ? 'Isolada' : 'Só esta'}
+                        </button>
+                      </div>
                     );
                   })}
 

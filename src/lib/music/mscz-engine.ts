@@ -21,7 +21,7 @@ export const UNSUPPORTED_FORMAT_MESSAGE =
 export const ALLOWED_EXTENSIONS = ['.mscz', '.mscx', '.xml', '.musicxml', '.mxl'];
 export const BLOCKED_EXTENSIONS = ['.mus', '.musx', '.sib', '.mid', '.midi', '.enc'];
 
-export type ScoreLayoutViewMode = 'portrait' | 'landscape' | 'full-score';
+export type ScoreLayoutViewMode = 'portrait' | 'continuous-vertical' | 'full-score';
 
 export interface FloatingTextBox {
   id: string;
@@ -111,7 +111,9 @@ export interface ScoreTransformOptions {
   targetInstrumentId: string;
   /** Selected staff ID to view/export ('1', '2', '3', etc.) */
   selectedStaffId: string;
-  /** Layout mode: portrait A4, landscape A4, or full-score stacked staves */
+  /** Multiple selected staff IDs when user keeps specific staves active */
+  selectedStaffIds?: string[];
+  /** Layout mode: portrait A4, continuous-vertical (no page breaks), or full-score stacked staves */
   viewMode: ScoreLayoutViewMode;
   /** Whether visible chords on a Sib/Mib staff should be transposed to the instrument's written key */
   convertBbEbChordsToWritten: boolean;
@@ -1118,10 +1120,24 @@ export function transformScoreXml(
   const semitoneShift = options.semitoneShift;
   const viewMode: ScoreLayoutViewMode = options.viewMode || 'portrait';
   const isFullScore = viewMode === 'full-score';
+  const isContinuousVertical = viewMode === 'continuous-vertical';
 
-  // Identificar pauta ativa selecionada pelo usuário (padrão: Pauta 1)
+  // Determinar conjunto de pautas ativas (Grade Completa = todas, ou seleção múltipla personalizada)
+  const rawSelectedIds = isFullScore
+    ? analysis.staves.map((s) => s.staffId)
+    : options.selectedStaffIds && options.selectedStaffIds.length > 0
+    ? options.selectedStaffIds
+    : [options.selectedStaffId || analysis.staves[0]?.staffId || '1'];
+
+  const activeStaffIdsSet = new Set(rawSelectedIds);
+  const activeStavesList = analysis.staves.filter((s) =>
+    activeStaffIdsSet.has(s.staffId)
+  );
+  const multipleStavesActive = activeStavesList.length > 1;
+
+  // Identificar pauta primária de referência (primeira pauta ativa)
   const activeStaff =
-    analysis.staves.find((s) => s.staffId === options.selectedStaffId) ||
+    activeStavesList[0] ||
     analysis.staves[0] || {
       staffId: '1',
       partIndex: 0,
@@ -1151,29 +1167,30 @@ export function transformScoreXml(
   // 2. Garantir layoutMode paginado (removendo line/system para renderização limpa)
   removeDirectChildrenByTag(scoreEl, 'layoutMode');
 
-  // 3. Configurar <Style>: Orientação (Vertical/Retrato vs Horizontal/Paisagem), Nomes na Grade e Marca d'Água
+  // 3. Configurar <Style>: Dimensões A4, Espaçamento Vertical Contínuo, Nomes na Grade e Marca d'Água
   let styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
   if (!styleEl) {
     styleEl = doc.createElement('Style');
     scoreEl.insertBefore(styleEl, scoreEl.firstChild);
   }
 
-  if (viewMode === 'landscape') {
-    setOrCreateDirectChildText(doc, styleEl, 'pageWidth', '11.69');
-    setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '8.27');
-    setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '10.50');
+  setOrCreateDirectChildText(doc, styleEl, 'pageWidth', '8.27');
+  setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '11.69');
+  setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '7.09');
+
+  if (isContinuousVertical) {
+    setOrCreateDirectChildText(doc, styleEl, 'enableVerticalSpread', '0');
+    setOrCreateDirectChildText(doc, styleEl, 'showFooter', '0');
+    setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '0');
   } else {
-    setOrCreateDirectChildText(doc, styleEl, 'pageWidth', '8.27');
-    setOrCreateDirectChildText(doc, styleEl, 'pageHeight', '11.69');
-    setOrCreateDirectChildText(doc, styleEl, 'pagePrintableWidth', '7.09');
+    setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
+    setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
   }
 
-  if (isFullScore) {
+  if (multipleStavesActive) {
     setOrCreateDirectChildText(doc, styleEl, 'hideInstrumentNameIfOneInstrument', '0');
   }
 
-  setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
-  setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
   setOrCreateDirectChildText(doc, styleEl, 'oddFooterR', 'Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'evenFooterR', 'Rubsax Partituras');
   setOrCreateDirectChildText(doc, styleEl, 'oddFooterC', '© Rubsax Partituras');
@@ -1182,9 +1199,9 @@ export function transformScoreXml(
   const spatiumMm =
     parseFloat(getDirectChildText(styleEl, 'Spatium', '1.75')) || 1.75;
   const pageWidthIn =
-    parseFloat(getDirectChildText(styleEl, 'pageWidth', viewMode === 'landscape' ? '11.69' : '8.27')) || 8.27;
+    parseFloat(getDirectChildText(styleEl, 'pageWidth', '8.27')) || 8.27;
   const pageHeightIn =
-    parseFloat(getDirectChildText(styleEl, 'pageHeight', viewMode === 'landscape' ? '8.27' : '11.69')) || 11.69;
+    parseFloat(getDirectChildText(styleEl, 'pageHeight', '11.69')) || 11.69;
   const pageWidthSp = (pageWidthIn * 25.4) / spatiumMm;
   const pageHeightSp = (pageHeightIn * 25.4) / spatiumMm;
 
@@ -1204,44 +1221,40 @@ export function transformScoreXml(
     scoreEl.appendChild(cMeta);
   }
 
-  // 4. Configurar visibilidade dos <Part>s conforme a pauta selecionada ou Grade Completa
+  // 4. Configurar visibilidade dos <Part>s conforme as pautas selecionadas ou Grade Completa
   const partEls = getDirectChildrenByTag(scoreEl, 'Part');
   partEls.forEach((partEl, pIdx) => {
     const partStaffEls = getDirectChildrenByTag(partEl, 'Staff');
     const partStaffIds = partStaffEls.map(
       (ps, i) => ps.getAttribute('id') || String(pIdx + i + 1)
     );
-    const containsActiveStaff = partStaffIds.includes(activeStaff.staffId);
+    const hasAnyActiveStaff = partStaffIds.some((id) => activeStaffIdsSet.has(id));
 
-    if (isFullScore) {
+    if (hasAnyActiveStaff) {
       removeDirectChildrenByTag(partEl, 'show');
-      partStaffEls.forEach((ps) => {
-        removeDirectChildrenByTag(ps, 'invisible');
-        removeDirectChildrenByTag(ps, 'visible');
-      });
-      // Garantir que <longName> exista no <Instrument> para exibir o nome à esquerda na Grade Completa
-      const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
-      const tName = getDirectChildText(partEl, 'trackName');
-      if (instrEl && tName && !getFirstDirectChildByTag(instrEl, 'longName')) {
-        setOrCreateDirectChildText(doc, instrEl, 'longName', tName, 'trackName');
-      }
-    } else if (containsActiveStaff) {
-      removeDirectChildrenByTag(partEl, 'show');
-      partStaffEls.forEach((ps) => {
-        const psId = ps.getAttribute('id') || '';
-        if (psId === activeStaff.staffId || partStaffEls.length === 1) {
+      partStaffEls.forEach((ps, i) => {
+        const psId = ps.getAttribute('id') || String(pIdx + i + 1);
+        if (activeStaffIdsSet.has(psId)) {
           removeDirectChildrenByTag(ps, 'invisible');
           removeDirectChildrenByTag(ps, 'visible');
         } else {
           setOrCreateDirectChildText(doc, ps, 'invisible', '1');
         }
       });
+
+      if (multipleStavesActive) {
+        const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
+        const tName = getDirectChildText(partEl, 'trackName');
+        if (instrEl && tName && !getFirstDirectChildByTag(instrEl, 'longName')) {
+          setOrCreateDirectChildText(doc, instrEl, 'longName', tName, 'trackName');
+        }
+      }
     } else {
       setOrCreateDirectChildText(doc, partEl, 'show', '0');
     }
   });
 
-  // 5. Garantir que o <VBox> de cabeçalho esteja na pauta visível ativa
+  // 5. Garantir que o <VBox> de cabeçalho esteja na primeira pauta visível ativa
   const staffBodies = getDirectChildrenByTag(scoreEl, 'Staff');
   const firstStaffBody = staffBodies[0];
   const activeStaffBody =
@@ -1265,9 +1278,16 @@ export function transformScoreXml(
 
   // Atualizar cabeçalhos e injetar Caixas de Texto Flutuantes no VBox da pauta visível
   if (targetVBoxOwner) {
-    const headerLabelForActiveMode = isFullScore
-      ? 'Grade Completa'
-      : activeStaff.headerInstrumentLabel;
+    const allStavesSelected =
+      analysis.staves.length > 1 &&
+      activeStavesList.length === analysis.staves.length;
+
+    const headerLabelForActiveMode =
+      isFullScore || allStavesSelected
+        ? 'Grade Completa'
+        : multipleStavesActive
+        ? activeStavesList.map((s) => s.displayName).join(' + ')
+        : activeStaff.headerInstrumentLabel;
 
     updateStaffHeadersAndFloatingTexts(
       doc,
@@ -1290,7 +1310,7 @@ export function transformScoreXml(
     const sid = staffBody.getAttribute('id') || String(sIdx + 1);
     const staffMeta =
       analysis.staves.find((st) => st.staffId === sid) || analysis.staves[sIdx];
-    const isThisStaffActive = isFullScore || sid === activeStaff.staffId;
+    const isThisStaffActive = activeStaffIdsSet.has(sid);
     const isPercussion = staffMeta ? staffMeta.isPercussion : false;
     const staffFifthsOffset = staffMeta ? staffMeta.fifthsOffset : 0;
     const staffWrittenSemitoneOffset = staffMeta ? staffMeta.writtenSemitoneOffset : 0;
