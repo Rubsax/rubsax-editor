@@ -44,6 +44,9 @@ export const metadata: Metadata = {
     index: true,
     follow: true,
   },
+  verification: {
+    google: 'igX2wWEErtY5EWJa6IBHMsk6nSGWUvJon8qiZWmT2uM',
+  },
   icons: {
     icon: [
       { url: '/icon.png', type: 'image/png' },
