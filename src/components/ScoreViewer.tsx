@@ -14,6 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
+  Unlock,
 } from 'lucide-react';
 
 export type CanvasThemeMode = 'parchment' | 'white';
@@ -33,6 +34,9 @@ interface ScoreViewerProps {
   onRequestPreview: () => void;
   onLoadingChange?: (loading: boolean) => void;
   activeActionId?: string | null;
+  ctaButtonText?: string;
+  onOpenPlansModal?: () => void;
+  onPreviewStateChange?: (state: { isPreview: boolean; totalPages: number }) => void;
 }
 
 interface DragState {
@@ -57,6 +61,9 @@ export default function ScoreViewer({
   onRequestPreview,
   onLoadingChange,
   activeActionId,
+  ctaButtonText,
+  onOpenPlansModal,
+  onPreviewStateChange,
 }: ScoreViewerProps) {
   const [svgPages, setSvgPages] = useState<string[]>([]);
   const [svgLoading, setSvgLoading] = useState<boolean>(false);
@@ -64,6 +71,9 @@ export default function ScoreViewer({
   const [pageWidthPx, setPageWidthPx] = useState<number>(860);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [currentVisiblePage, setCurrentVisiblePage] = useState<number>(1);
+  const [isPreview, setIsPreview] = useState<boolean>(false);
+  const [totalPagesCount, setTotalPagesCount] = useState<number>(1);
+  const [serverCtaText, setServerCtaText] = useState<string>('');
 
   const [dragState, setDragState] = useState<DragState | null>(null);
   const viewerRootRef = useRef<HTMLDivElement | null>(null);
@@ -114,6 +124,14 @@ export default function ScoreViewer({
         );
         setSvgPages(responsivePages);
         setCurrentVisiblePage(1);
+        const nextIsPreview = Boolean(data.isPreview);
+        const nextTotalPages = Number(data.totalPages) || responsivePages.length;
+        setIsPreview(nextIsPreview);
+        setTotalPagesCount(nextTotalPages);
+        if (typeof data.ctaText === 'string' && data.ctaText) {
+          setServerCtaText(data.ctaText);
+        }
+        onPreviewStateChange?.({ isPreview: nextIsPreview, totalPages: nextTotalPages });
       } catch (err: unknown) {
         if (cancelled || controller.signal.aborted) return;
         const msg =
@@ -517,14 +535,28 @@ export default function ScoreViewer({
               </button>
             </div>
 
-            {/* Botão Destacado de Tela Cheia (Expandir Visor) */}
+            {/* Botão Destacado de Tela Cheia (Expandir Visor) ou Cadeado em Modo Prévia */}
             <button
               type="button"
-              onClick={() => void enterFullscreen()}
+              onClick={() => {
+                if (isPreview) {
+                  onOpenPlansModal?.();
+                  return;
+                }
+                void enterFullscreen();
+              }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500/20 hover:bg-sax-500/30 border border-sax-500/50 text-sax-300 font-bold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
-              title="Expandir Visor para Tela Cheia"
+              title={
+                isPreview
+                  ? 'Modo Prévia: desbloqueie a partitura para usar Tela Cheia'
+                  : 'Expandir Visor para Tela Cheia'
+              }
             >
-              <Maximize2 className="w-3.5 h-3.5 text-sax-400" />
+              {isPreview ? (
+                <Lock className="w-3.5 h-3.5 text-sax-400" />
+              ) : (
+                <Maximize2 className="w-3.5 h-3.5 text-sax-400" />
+              )}
               <span>Tela Cheia</span>
             </button>
           </div>
@@ -572,10 +604,11 @@ export default function ScoreViewer({
                 key={idx}
                 className={`w-full rounded-xl shadow-2xl border overflow-hidden relative transition-colors ${bgClass}`}
               >
-                {/* Selo discreto de página */}
+                {/* Selo discreto de página com total real de páginas (inclusive em Modo Prévia) */}
                 <div className="flex items-center justify-between px-4 py-1.5 text-[11px] border-b border-black/10 bg-black/[0.03]">
                   <span className="font-medium opacity-75">
-                    Página {idx + 1} de {svgPages.length}
+                    Página {idx + 1} de {totalPagesCount || svgPages.length}
+                    {isPreview && ' (Prévia)'}
                   </span>
                   <span className="inline-flex items-center gap-1 font-semibold opacity-80">
                     <Lock className="w-3 h-3" />
@@ -594,6 +627,33 @@ export default function ScoreViewer({
 
                   {renderFloatingOverlayBoxes(idx, pageFloatingTexts)}
                 </div>
+
+                {/* Paywall CTA em Modo Prévia (exibido logo abaixo do recorte da Página 1) */}
+                {isPreview && idx === 0 && (
+                  <div className="relative px-4 sm:px-8 py-8 sm:py-10 bg-gradient-to-t from-studio-950 via-studio-950/95 to-studio-950/75 text-zinc-100 border-t border-sax-500/30 flex flex-col items-center text-center gap-3">
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sax-500/15 border border-sax-500/40 text-sax-300 text-[11px] font-bold">
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>
+                        Prévia gratuita • Partitura completa tem {totalPagesCount || 1}{' '}
+                        {(totalPagesCount || 1) === 1 ? 'página' : 'páginas'}
+                      </span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-zinc-300 max-w-md">
+                      Gostou da transposição e diagramação? Desbloqueie todas as páginas, Tela
+                      Cheia e exportação em PDF de alta definição.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => onOpenPlansModal?.()}
+                      className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold shadow-xl shadow-sax-500/20 active:scale-95 transition-transform duration-75 touch-manipulation"
+                    >
+                      <Unlock className="w-4 h-4" />
+                      <span>
+                        {ctaButtonText || serverCtaText || 'Visualizar partitura inteira'}
+                      </span>
+                    </button>
+                  </div>
+                )}
 
                 {/* Marca d'Água Obrigatória Fixa e Imutável na Tela */}
                 <div className="px-4 py-2 border-t border-black/10 bg-black/[0.04] flex items-center justify-between text-[11px] select-none pointer-events-none">

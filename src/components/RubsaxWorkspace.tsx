@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   TONALITIES,
   getInstrumentById,
@@ -19,9 +20,19 @@ import {
   unpackScoreBuffer,
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
+import { DEFAULT_APP_SETTINGS, type AppSettings } from '@/lib/settings';
+import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
+import {
+  type ClientAuthUser,
+  computeFileSha256Hex,
+  signOutUser,
+} from '@/lib/supabase/client';
 import ScoreViewer, { CanvasThemeMode } from './ScoreViewer';
 import BbEbChordModal from './BbEbChordModal';
 import EcosystemFooter from './EcosystemFooter';
+import AuthModal from './AuthModal';
+import PlansModal from './PlansModal';
+import AccountModal from './AccountModal';
 import {
   Upload,
   FileDown,
@@ -47,6 +58,14 @@ import {
   SplitSquareVertical,
   Scaling,
   ShieldAlert,
+  LogIn,
+  Crown,
+  User,
+  Shield,
+  Lock,
+  Megaphone,
+  Wrench,
+  X,
 } from 'lucide-react';
 
 type TransposeDirectionMode = 'closest' | 'up' | 'down';
@@ -73,15 +92,96 @@ export default function RubsaxWorkspace() {
   const [copyrightAccepted, setCopyrightAccepted] = useState<boolean>(false);
   const [copyrightError, setCopyrightError] = useState<boolean>(false);
 
+  // Sessão Auth, Modo Dev, Configurações Dinâmicas & Controle de Acesso
+  const [authUser, setAuthUser] = useState<ClientAuthUser | null>(null);
+  const [isDev, setIsDev] = useState<boolean>(false);
+  const [accessLevel, setAccessLevel] = useState<'dev' | 'subscription' | 'single' | 'preview'>('preview');
+  const [activeSubscription, setActiveSubscription] = useState<SubscriptionRow | null>(null);
+  const [activeSingleUnlocks, setActiveSingleUnlocks] = useState<SingleUnlockRow[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [fileHash, setFileHash] = useState<string>('');
+  const [viewerPreviewState, setViewerPreviewState] = useState<{
+    isPreview: boolean;
+    totalPages: number;
+  }>({ isPreview: true, totalPages: 1 });
+  const [devBadgeHidden, setDevBadgeHidden] = useState<boolean>(false);
+  const [announcementDismissed, setAnnouncementDismissed] = useState<boolean>(false);
+  const [userMenuOpen, setUserMenuOpen] = useState<boolean>(false);
+  const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
+  const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
+  const [accountModalOpen, setAccountModalOpen] = useState<boolean>(false);
+
   useEffect(() => {
     try {
       if (localStorage.getItem('rubsax_copyright_accepted') === 'true') {
         setCopyrightAccepted(true);
       }
+      if (localStorage.getItem('rubsax_hide_dev_badge') === 'true') {
+        setDevBadgeHidden(true);
+      }
+      const params = new URLSearchParams(window.location.search);
+      const authErr = params.get('auth_error');
+      if (authErr) {
+        setUploadError(`Não foi possível concluir o login (${authErr}). Tente novamente.`);
+      }
     } catch {
       // Ignora erro caso localStorage não esteja disponível
     }
   }, []);
+
+  const refreshAuthAndSettings = useCallback(
+    async (hashToCheck?: string, forceScoreReload = false) => {
+      try {
+        const effectiveHash = hashToCheck ?? fileHash;
+        const qs = effectiveHash ? `?fileHash=${encodeURIComponent(effectiveHash)}` : '';
+        const res = await fetch(`/api/auth/me${qs}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        setAuthUser(data.user || null);
+        setIsDev(Boolean(data.isDev));
+        const nextLevel = data.access?.level || 'preview';
+        setAccessLevel(nextLevel);
+        setActiveSubscription(data.activeSubscription || null);
+        setActiveSingleUnlocks(data.activeSingleUnlocks || []);
+        if (data.settings) {
+          setAppSettings((prev) => ({
+            ...prev,
+            pricing: data.settings.pricing || prev.pricing,
+            paywall: data.settings.paywall || prev.paywall,
+            announcement: data.settings.announcement || prev.announcement,
+            operations: { ...prev.operations, ...(data.settings.operations || {}) },
+            support_links: data.settings.support_links || prev.support_links,
+          }));
+        }
+        if (forceScoreReload) {
+          setRenderVersion((v) => v + 1);
+        }
+      } catch {
+        // Fallback silencioso para configurações padrão
+      }
+    },
+    [fileHash]
+  );
+
+  useEffect(() => {
+    void refreshAuthAndSettings();
+  }, [refreshAuthAndSettings]);
+
+  const handleToggleDevBadgeHidden = () => {
+    setDevBadgeHidden((prev) => {
+      const next = !prev;
+      try {
+        if (next) {
+          localStorage.setItem('rubsax_hide_dev_badge', 'true');
+        } else {
+          localStorage.removeItem('rubsax_hide_dev_badge');
+        }
+      } catch {
+        // Ignore
+      }
+      return next;
+    });
+  };
 
   // Raw file state (Upload First: starts empty with no sample loaded)
   const [originalBase64, setOriginalBase64] = useState<string>('');
@@ -189,6 +289,14 @@ export default function RubsaxWorkspace() {
   const loadScoreFromBuffer = useCallback(
     async (arrayBuf: ArrayBuffer, fileName: string) => {
       setUploadError(null);
+      if (appSettings.operations.maintenance_mode && !isDev) {
+        setUploadError(
+          appSettings.operations.maintenance_message ||
+            'Sistema em manutenção temporária. Voltamos em instantes.'
+        );
+        return;
+      }
+
       const validation = validateUploadFileName(fileName);
       if (!validation.valid) {
         setUploadError(validation.error || UNSUPPORTED_FORMAT_MESSAGE);
@@ -197,6 +305,22 @@ export default function RubsaxWorkspace() {
 
       setIsLoadingFile(true);
       try {
+        const computedHash = await computeFileSha256Hex(arrayBuf);
+        setFileHash(computedHash);
+
+        // Registra aceite de direitos autorais vinculado ao hash do arquivo
+        void fetch('/api/consent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            consentType: 'copyright_upload',
+            termsVersion: 'v1.3',
+            fileHash: computedHash,
+          }),
+        }).catch(() => {});
+
+        void refreshAuthAndSettings(computedHash);
+
         const b64 = arrayBufferToBase64(arrayBuf);
         let serverConvertedMscx: string | undefined;
 
@@ -305,7 +429,7 @@ export default function RubsaxWorkspace() {
         setIsLoadingFile(false);
       }
     },
-    []
+    [appSettings.operations.maintenance_message, appSettings.operations.maintenance_mode, isDev, refreshAuthAndSettings]
   );
 
   const handleFileUpload = useCallback(
@@ -666,6 +790,10 @@ export default function RubsaxWorkspace() {
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
+        if (res.status === 403 && errData.error === 'PAYWALL_REQUIRED') {
+          setPlansModalOpen(true);
+          return;
+        }
         throw new Error(errData.error || 'Erro ao exportar PDF no servidor.');
       }
 
@@ -687,8 +815,20 @@ export default function RubsaxWorkspace() {
     }
   };
 
+  const isPreviewLocked =
+    !isDev &&
+    appSettings.paywall.paywall_enabled !== false &&
+    accessLevel === 'preview';
+
+  const maintenanceBlocked =
+    Boolean(appSettings.operations.maintenance_mode) && !isDev;
+
   const handleRequestExportPdf = () => {
     if (isExportingPdf) return;
+    if (isPreviewLocked) {
+      setPlansModalOpen(true);
+      return;
+    }
     if (isProcessing || hasUnrenderedChanges) {
       setShowUnappliedChangesModal(true);
       return;
@@ -733,7 +873,56 @@ export default function RubsaxWorkspace() {
         }}
       />
 
-      {/* BARRA SUPERIOR PRINCIPAL: RUBSAX TRANSPOSER v1.3 + Ecossistema + Tonalidade + Ações */}
+      {/* BANNER GLOBAL DE AVISO (Lido de app_settings.announcement) */}
+      {appSettings.announcement.enabled &&
+        appSettings.announcement.message.trim() &&
+        !announcementDismissed && (
+          <div
+            className={`px-4 py-2 text-xs sm:text-sm border-b flex items-center justify-between gap-3 ${
+              appSettings.announcement.type === 'warning'
+                ? 'bg-amber-950/90 border-amber-500/50 text-amber-100'
+                : appSettings.announcement.type === 'promo'
+                ? 'bg-gradient-to-r from-[#D97706]/30 via-sax-500/20 to-[#D97706]/30 border-sax-500/50 text-sax-100'
+                : 'bg-sky-950/80 border-sky-500/40 text-sky-100'
+            }`}
+          >
+            <div className="flex items-center gap-2 mx-auto text-center flex-wrap justify-center">
+              <Megaphone className="w-4 h-4 text-sax-400 shrink-0" />
+              <span className="font-semibold">{appSettings.announcement.message}</span>
+              {appSettings.announcement.link_url && (
+                <a
+                  href={appSettings.announcement.link_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline font-extrabold text-sax-300 hover:text-sax-200"
+                >
+                  {appSettings.announcement.link_label || 'Saiba mais'}
+                </a>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setAnnouncementDismissed(true)}
+              className="p-1 rounded-lg hover:bg-black/25 text-current shrink-0"
+              aria-label="Fechar aviso"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+      {/* BANNER DE MANUTENÇÃO PARA USUÁRIOS COMUNS */}
+      {maintenanceBlocked && (
+        <div className="bg-amber-950/95 border-b border-amber-500/60 px-4 py-3 text-amber-100 text-xs sm:text-sm flex items-center justify-center gap-2.5 text-center">
+          <Wrench className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="font-bold">
+            {appSettings.operations.maintenance_message ||
+              'Estamos realizando uma melhoria rápida. Voltamos em instantes!'}
+          </span>
+        </div>
+      )}
+
+      {/* BARRA SUPERIOR PRINCIPAL: RUBSAX TRANSPOSER v1.3 + Ecossistema + Auth/Dev + Tonalidade + Ações */}
       <header className="sticky top-0 z-30 bg-studio-900/95 backdrop-blur-md border-b border-zinc-800 px-3 sm:px-5 py-2.5 shadow-lg">
         <div className="max-w-[1800px] mx-auto flex flex-wrap items-center justify-between gap-2.5 sm:gap-3">
           {/* Logo & Marca Oficial */}
@@ -761,10 +950,10 @@ export default function RubsaxWorkspace() {
             </div>
           </div>
 
-          {/* Botões do Ecossistema Rubsax (Visíveis sempre no Desktop e Mobile) */}
-          <div className="flex items-center gap-1.5 sm:gap-2">
+          {/* Botões do Ecossistema Rubsax + Conta / Modo Dev */}
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
             <a
-              href="https://catalogo.rubsax.com.br/"
+              href={appSettings.support_links.catalog_url}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-95 transition-transform duration-75 touch-manipulation"
@@ -774,7 +963,7 @@ export default function RubsaxWorkspace() {
             </a>
 
             <a
-              href="https://www.rubsax.com.br/"
+              href={appSettings.support_links.store_url}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-sax-500/20 hover:bg-sax-500/30 text-sax-300 text-xs font-extrabold border border-sax-500/50 shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
@@ -782,6 +971,121 @@ export default function RubsaxWorkspace() {
               <ShoppingCart className="w-3.5 h-3.5 text-sax-400" />
               <span>Loja Oficial</span>
             </a>
+
+            {/* Badge Modo Dev com botão rápido de olho/ocultar para gravações no YouTube */}
+            {isDev && (
+              <div className="inline-flex items-center gap-1">
+                {!devBadgeHidden && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-[11px] font-extrabold">
+                    <Crown className="w-3 h-3" />
+                    <span>Modo Dev</span>
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleToggleDevBadgeHidden}
+                  className="p-1.5 rounded-lg bg-zinc-800/70 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700/70 transition"
+                  title={
+                    devBadgeHidden
+                      ? 'Mostrar badge Modo Dev'
+                      : 'Ocultar badge Modo Dev (ideal para gravar tela)'
+                  }
+                >
+                  {devBadgeHidden ? (
+                    <Eye className="w-3.5 h-3.5" />
+                  ) : (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Login ("Entrar") ou Menu do Usuário */}
+            {!authUser ? (
+              <button
+                type="button"
+                onClick={() => setAuthModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-white hover:bg-zinc-100 text-slate-900 text-xs font-extrabold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Entrar</span>
+              </button>
+            ) : (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen((v) => !v)}
+                  className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-bold text-zinc-100 transition"
+                >
+                  {authUser.avatar_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={authUser.avatar_url}
+                      alt={authUser.full_name || authUser.email}
+                      className="w-5 h-5 rounded-full object-cover"
+                    />
+                  ) : (
+                    <User className="w-3.5 h-3.5 text-sax-400" />
+                  )}
+                  <span className="max-w-[110px] truncate hidden sm:inline">
+                    {authUser.full_name?.split(' ')[0] || authUser.email.split('@')[0]}
+                  </span>
+                </button>
+
+                {userMenuOpen && (
+                  <div
+                    className="absolute right-0 mt-2 w-52 rounded-2xl bg-studio-900 border border-zinc-700 shadow-2xl py-1.5 z-50 text-xs"
+                    onMouseLeave={() => setUserMenuOpen(false)}
+                  >
+                    <div className="px-3.5 py-2 border-b border-zinc-800">
+                      <p className="font-bold text-white truncate">
+                        {authUser.full_name || 'Músico Rubsax'}
+                      </p>
+                      <p className="text-[11px] text-zinc-400 truncate">{authUser.email}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        setAccountModalOpen(true);
+                      }}
+                      className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2"
+                    >
+                      <User className="w-3.5 h-3.5 text-sax-400" />
+                      <span>Minha Conta</span>
+                    </button>
+                    {isDev && (
+                      <Link
+                        href="/admin"
+                        onClick={() => setUserMenuOpen(false)}
+                        className="w-full px-3.5 py-2 hover:bg-zinc-800 text-sax-300 font-bold flex items-center gap-2"
+                      >
+                        <Shield className="w-3.5 h-3.5 text-sax-400" />
+                        <span>Painel /admin</span>
+                      </Link>
+                    )}
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setUserMenuOpen(false);
+                        await signOutUser();
+                        setAuthUser(null);
+                        setIsDev(false);
+                        setAccessLevel('preview');
+                        setActiveSubscription(null);
+                        setActiveSingleUnlocks([]);
+                        if (analysis) {
+                          setRenderVersion((v) => v + 1);
+                        }
+                      }}
+                      className="w-full px-3.5 py-2 text-left hover:bg-red-950/40 text-red-300 font-semibold border-t border-zinc-800 mt-1"
+                    >
+                      Sair da Conta
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* VISOR CENTRAL DE TONALIDADE */}
@@ -847,7 +1151,11 @@ export default function RubsaxWorkspace() {
                 type="button"
                 disabled={isExportingPdf}
                 onClick={handleRequestExportPdf}
-                title="Exportar PDF fiel pelo MuseScore 3"
+                title={
+                  isPreviewLocked
+                    ? 'Modo Prévia: desbloqueie a partitura para exportar em PDF'
+                    : 'Exportar PDF fiel pelo MuseScore 3'
+                }
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 active:scale-95 transition-transform duration-75 touch-manipulation"
               >
                 {isExportingPdf ? (
@@ -857,7 +1165,11 @@ export default function RubsaxWorkspace() {
                   </>
                 ) : (
                   <>
-                    <FileDown className="w-4 h-4" />
+                    {isPreviewLocked ? (
+                      <Lock className="w-4 h-4" />
+                    ) : (
+                      <FileDown className="w-4 h-4" />
+                    )}
                     <span>Exportar PDF</span>
                   </>
                 )}
@@ -887,6 +1199,20 @@ export default function RubsaxWorkspace() {
       {/* TELA INICIAL "UPLOAD FIRST" */}
       {!analysis ? (
         <main className="flex-1 flex items-center justify-center p-4 sm:p-8">
+          {maintenanceBlocked ? (
+            <div className="w-full max-w-xl rounded-3xl border-2 border-amber-500/40 bg-studio-900/90 p-8 sm:p-12 text-center shadow-2xl space-y-4">
+              <div className="w-16 h-16 mx-auto rounded-2xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center">
+                <Wrench className="w-8 h-8 text-amber-400" />
+              </div>
+              <h2 className="text-xl font-extrabold text-white">
+                Manutenção Programada
+              </h2>
+              <p className="text-sm text-zinc-300 leading-relaxed">
+                {appSettings.operations.maintenance_message ||
+                  'Estamos realizando uma melhoria rápida. Voltamos em instantes!'}
+              </p>
+            </div>
+          ) : (
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -1011,6 +1337,7 @@ export default function RubsaxWorkspace() {
               </div>
             )}
           </div>
+          )}
         </main>
       ) : (
         /* INTERFACE COMPLETA DE EDIÇÃO, TRANSPOSIÇÃO E VISUALIZAÇÃO */
@@ -1353,11 +1680,17 @@ export default function RubsaxWorkspace() {
                     type="button"
                     disabled={isExportingPdf}
                     onClick={handleRequestExportPdf}
-                    title="Baixar PDF fiel"
+                    title={
+                      isPreviewLocked
+                        ? 'Desbloqueie para baixar PDF fiel'
+                        : 'Baixar PDF fiel'
+                    }
                     className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
                   >
                     {isExportingPdf ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : isPreviewLocked ? (
+                      <Lock className="w-3.5 h-3.5" />
                     ) : (
                       <FileDown className="w-3.5 h-3.5" />
                     )}
@@ -2495,14 +2828,65 @@ export default function RubsaxWorkspace() {
                 onRequestPreview={handleTriggerPreview}
                 onLoadingChange={setIsSvgLoading}
                 activeActionId={activeActionId}
+                ctaButtonText={appSettings.paywall.cta_button_text}
+                onOpenPlansModal={() => setPlansModalOpen(true)}
+                onPreviewStateChange={setViewerPreviewState}
               />
             )}
           </main>
         </div>
       )}
 
-      {/* RODAPÉ INSTITUCIONAL COMPLETO E MODAIS LEGAIS */}
-      <EcosystemFooter />
+      {/* RODAPÉ INSTITUCIONAL COMPLETO E LINKS LEGAIS */}
+      <EcosystemFooter supportLinks={appSettings.support_links} />
+
+      {/* MODAIS DE AUTENTICAÇÃO, PLANOS E ÁREA DO CLIENTE */}
+      <AuthModal
+        open={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthenticated={(u) => {
+          setAuthUser(u);
+          void refreshAuthAndSettings(fileHash, Boolean(analysis));
+        }}
+      />
+
+      <PlansModal
+        open={plansModalOpen}
+        onClose={() => setPlansModalOpen(false)}
+        user={authUser}
+        pricing={appSettings.pricing}
+        paywall={appSettings.paywall}
+        fileName={analysis?.fileName}
+        onRequireLogin={() => setAuthModalOpen(true)}
+      />
+
+      <AccountModal
+        open={accountModalOpen}
+        onClose={() => setAccountModalOpen(false)}
+        user={authUser}
+        isDev={isDev}
+        activeSubscription={activeSubscription}
+        activeSingleUnlocks={activeSingleUnlocks}
+        onSignOut={async () => {
+          await signOutUser();
+          setAccountModalOpen(false);
+          setAuthUser(null);
+          setIsDev(false);
+          setAccessLevel('preview');
+          setActiveSubscription(null);
+          setActiveSingleUnlocks([]);
+          if (analysis) setRenderVersion((v) => v + 1);
+        }}
+        onAccountDeleted={() => {
+          setAccountModalOpen(false);
+          setAuthUser(null);
+          setIsDev(false);
+          setAccessLevel('preview');
+          setActiveSubscription(null);
+          setActiveSingleUnlocks([]);
+          if (analysis) setRenderVersion((v) => v + 1);
+        }}
+      />
 
       {/* MODAL OBRIGATÓRIO DE AVISO DE CIFRAS PARA INSTRUMENTOS EM SIB (Bb) E MIB (Eb) */}
       <BbEbChordModal

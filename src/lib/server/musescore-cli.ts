@@ -5,70 +5,13 @@ import fsp from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import {
+  TEMP_DIR_PREFIXES,
+  cleanupMuseScoreTmpDirs,
+  enqueueMuseScoreTask,
+} from '@/lib/mscore-queue';
 
 const execFileAsync = promisify(execFile);
-
-const TEMP_DIR_PREFIXES = ['rubsax_pdf_', 'rubsax_svg_', 'rubsax_conv_'] as const;
-const STALE_TEMP_AGE_MS = 2 * 60 * 1000;
-
-const MAX_PENDING_JOBS = 15;
-
-/**
- * Fila sequencial em memória para limitar a 1 execução simultânea do MuseScore 3,
- * protegendo servidores de 1 vCPU / 2 GB RAM contra picos de concorrência.
- */
-let museScoreQueueTail: Promise<void> = Promise.resolve();
-let pendingJobsCount = 0;
-
-function withMuseScoreLock<T>(task: () => Promise<T>): Promise<T> {
-  if (pendingJobsCount >= MAX_PENDING_JOBS) {
-    return Promise.reject(
-      new Error(
-        'Servidor ocupado processando outras partituras no momento. Aguarde alguns segundos e tente novamente.'
-      )
-    );
-  }
-
-  pendingJobsCount += 1;
-  const run = museScoreQueueTail.then(task, task);
-  museScoreQueueTail = run.then(
-    () => undefined,
-    () => undefined
-  );
-
-  return run.finally(() => {
-    pendingJobsCount = Math.max(0, pendingJobsCount - 1);
-  });
-}
-
-/**
- * Remove pastas temporárias órfãs em /tmp com mais de 2 minutos para manter o disco sempre limpo.
- */
-async function cleanupStaleTempDirs(): Promise<void> {
-  try {
-    const tmpRoot = os.tmpdir();
-    const entries = await fsp.readdir(tmpRoot, { withFileTypes: true });
-    const now = Date.now();
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      if (!TEMP_DIR_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) {
-        continue;
-      }
-      const fullPath = path.join(tmpRoot, entry.name);
-      try {
-        const stat = await fsp.stat(fullPath);
-        if (now - stat.mtimeMs > STALE_TEMP_AGE_MS) {
-          await fsp.rm(fullPath, { recursive: true, force: true });
-        }
-      } catch {
-        // Ignora entrada já removida por outra requisição
-      }
-    }
-  } catch {
-    // Falha não crítica na varredura de limpeza
-  }
-}
 
 export function getMuseScoreBinPath(): string {
   if (process.env.MUSESCORE_BIN_PATH && process.env.MUSESCORE_BIN_PATH.trim()) {
@@ -158,59 +101,77 @@ async function executeMuseScoreCommand(
 
 async function withTempMuseScoreDir<T>(
   prefix: (typeof TEMP_DIR_PREFIXES)[number],
-  fn: (tempDir: string) => Promise<T>
+  fn: (tempDir: string) => Promise<T>,
+  options?: { isDev?: boolean }
 ): Promise<T> {
-  return withMuseScoreLock(async () => {
-    ensureMuseScoreRuntimeDirs();
-    await cleanupStaleTempDirs();
+  return enqueueMuseScoreTask(
+    async () => {
+      ensureMuseScoreRuntimeDirs();
+      await cleanupMuseScoreTmpDirs();
 
-    const tempDir = path.join(os.tmpdir(), `${prefix}${crypto.randomUUID()}`);
-    await fsp.mkdir(tempDir, { recursive: true });
+      const tempDir = path.join(os.tmpdir(), `${prefix}${crypto.randomUUID()}`);
+      await fsp.mkdir(tempDir, { recursive: true });
 
-    try {
-      return await fn(tempDir);
-    } finally {
-      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    }
-  });
+      try {
+        return await fn(tempDir);
+      } finally {
+        await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    },
+    { isDev: Boolean(options?.isDev) }
+  );
 }
 
-export async function runMuseScoreHeadlessPdf(msczBuffer: Buffer): Promise<Buffer> {
-  return withTempMuseScoreDir('rubsax_pdf_', async (tempDir) => {
-    const inputMsczPath = path.join(tempDir, 'input.mscz');
-    const outputPdfPath = path.join(tempDir, 'output.pdf');
+export async function runMuseScoreHeadlessPdf(
+  msczBuffer: Buffer,
+  options?: { isDev?: boolean }
+): Promise<Buffer> {
+  return withTempMuseScoreDir(
+    'rubsax_pdf_',
+    async (tempDir) => {
+      const inputMsczPath = path.join(tempDir, 'input.mscz');
+      const outputPdfPath = path.join(tempDir, 'output.pdf');
 
-    await fsp.writeFile(inputMsczPath, msczBuffer);
-    await executeMuseScoreCommand(inputMsczPath, outputPdfPath);
+      await fsp.writeFile(inputMsczPath, msczBuffer);
+      await executeMuseScoreCommand(inputMsczPath, outputPdfPath);
 
-    return await fsp.readFile(outputPdfPath);
-  });
+      return await fsp.readFile(outputPdfPath);
+    },
+    options
+  );
 }
 
-export async function runMuseScoreHeadlessSvgPages(msczBuffer: Buffer): Promise<string[]> {
-  return withTempMuseScoreDir('rubsax_svg_', async (tempDir) => {
-    const inputMsczPath = path.join(tempDir, 'input.mscz');
-    const outputSvgBase = path.join(tempDir, 'page.svg');
+export async function runMuseScoreHeadlessSvgPages(
+  msczBuffer: Buffer,
+  options?: { isDev?: boolean }
+): Promise<string[]> {
+  return withTempMuseScoreDir(
+    'rubsax_svg_',
+    async (tempDir) => {
+      const inputMsczPath = path.join(tempDir, 'input.mscz');
+      const outputSvgBase = path.join(tempDir, 'page.svg');
 
-    await fsp.writeFile(inputMsczPath, msczBuffer);
-    await executeMuseScoreCommand(inputMsczPath, outputSvgBase);
+      await fsp.writeFile(inputMsczPath, msczBuffer);
+      await executeMuseScoreCommand(inputMsczPath, outputSvgBase);
 
-    const files = await fsp.readdir(tempDir);
-    const svgFiles = files
-      .filter((f) => f.toLowerCase().endsWith('.svg'))
-      .sort((a, b) => {
-        const numA = parseInt(a.match(/(\d+)\.svg$/i)?.[1] || '1', 10);
-        const numB = parseInt(b.match(/(\d+)\.svg$/i)?.[1] || '1', 10);
-        return numA - numB;
-      });
+      const files = await fsp.readdir(tempDir);
+      const svgFiles = files
+        .filter((f) => f.toLowerCase().endsWith('.svg'))
+        .sort((a, b) => {
+          const numA = parseInt(a.match(/(\d+)\.svg$/i)?.[1] || '1', 10);
+          const numB = parseInt(b.match(/(\d+)\.svg$/i)?.[1] || '1', 10);
+          return numA - numB;
+        });
 
-    const pages: string[] = [];
-    for (const svgFile of svgFiles) {
-      const content = await fsp.readFile(path.join(tempDir, svgFile), 'utf-8');
-      pages.push(content);
-    }
-    return pages;
-  });
+      const pages: string[] = [];
+      for (const svgFile of svgFiles) {
+        const content = await fsp.readFile(path.join(tempDir, svgFile), 'utf-8');
+        pages.push(content);
+      }
+      return pages;
+    },
+    options
+  );
 }
 
 /**
@@ -218,17 +179,22 @@ export async function runMuseScoreHeadlessSvgPages(msczBuffer: Buffer): Promise<
  */
 export async function runMuseScoreConvertToMscx(
   inputBuffer: Buffer,
-  originalExtension: string
+  originalExtension: string,
+  options?: { isDev?: boolean }
 ): Promise<string> {
-  return withTempMuseScoreDir('rubsax_conv_', async (tempDir) => {
-    const safeExt = originalExtension.startsWith('.')
-      ? originalExtension.toLowerCase()
-      : `.${originalExtension.toLowerCase()}`;
-    const inputPath = path.join(tempDir, `input${safeExt}`);
-    const outputMscxPath = path.join(tempDir, 'converted.mscx');
+  return withTempMuseScoreDir(
+    'rubsax_conv_',
+    async (tempDir) => {
+      const safeExt = originalExtension.startsWith('.')
+        ? originalExtension.toLowerCase()
+        : `.${originalExtension.toLowerCase()}`;
+      const inputPath = path.join(tempDir, `input${safeExt}`);
+      const outputMscxPath = path.join(tempDir, 'converted.mscx');
 
-    await fsp.writeFile(inputPath, inputBuffer);
-    await executeMuseScoreCommand(inputPath, outputMscxPath);
-    return await fsp.readFile(outputMscxPath, 'utf-8');
-  });
+      await fsp.writeFile(inputPath, inputBuffer);
+      await executeMuseScoreCommand(inputPath, outputMscxPath);
+      return await fsp.readFile(outputMscxPath, 'utf-8');
+    },
+    options
+  );
 }

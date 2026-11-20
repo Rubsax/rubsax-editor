@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateUploadFileName } from '@/lib/music/mscz-engine';
 import { runMuseScoreConvertToMscx } from '@/lib/server/musescore-cli';
+import { getAppSettings } from '@/lib/settings';
+import { getServerSessionUser, isAdminEmail } from '@/lib/supabase/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -25,8 +27,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: validation.error }, { status: 400 });
     }
 
+    const [user, settings] = await Promise.all([
+      getServerSessionUser(),
+      getAppSettings(),
+    ]);
+    const isDev = user ? isAdminEmail(user.email) : false;
+
+    if (settings.operations.maintenance_mode && !isDev) {
+      return NextResponse.json(
+        { error: settings.operations.maintenance_message, code: 'MAINTENANCE_MODE' },
+        { status: 503 }
+      );
+    }
+
     const buffer = Buffer.from(originalBase64, 'base64');
-    const mscxContent = await runMuseScoreConvertToMscx(buffer, validation.extension);
+    const mscxContent = await runMuseScoreConvertToMscx(buffer, validation.extension, {
+      isDev,
+    });
 
     return NextResponse.json({ mscxContent });
   } catch (err: unknown) {

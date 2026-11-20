@@ -1,4 +1,6 @@
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { checkUserAccess } from '@/lib/access';
 import {
   ScoreTransformOptions,
   analyzeScoreXml,
@@ -8,6 +10,9 @@ import {
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
 import { runMuseScoreHeadlessPdf } from '@/lib/server/musescore-cli';
+import { getAppSettings } from '@/lib/settings';
+import { logUsage } from '@/lib/supabase/admin';
+import { getServerSessionUser } from '@/lib/supabase/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -15,13 +20,19 @@ export const dynamic = 'force-dynamic';
 export async function POST(req: NextRequest) {
   try {
     const contentType = req.headers.get('content-type') || '';
+    let rawBuffer: Buffer;
     let msczBuffer: Buffer;
     let exportFileName = 'Partitura-Rubsax.pdf';
+    let uploadFileName = 'partitura.mscz';
+    let optionsJson: string | null = null;
+    let optionsObj: ScoreTransformOptions | undefined;
+    let modifiedMscxText: string | undefined;
+    let customPdfName: string | undefined;
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
-      const optionsJson = formData.get('options') as string | null;
+      optionsJson = formData.get('options') as string | null;
       const modifiedMscxField = formData.get('modifiedMscx') as string | null;
 
       if (!file) {
@@ -31,46 +42,18 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const validation = validateUploadFileName(file.name);
+      uploadFileName = file.name;
+      const validation = validateUploadFileName(uploadFileName);
       if (!validation.valid) {
         return NextResponse.json({ error: validation.error }, { status: 400 });
       }
 
       const arrayBuf = await file.arrayBuffer();
-      const rawBuffer = Buffer.from(arrayBuf);
-
-      if (modifiedMscxField) {
-        msczBuffer = await buildModifiedMsczBuffer(rawBuffer, file.name, modifiedMscxField);
-      } else if (optionsJson) {
-        const options = JSON.parse(optionsJson) as ScoreTransformOptions;
-        const unpacked = await unpackScoreBuffer(rawBuffer, file.name);
-        const analysis = analyzeScoreXml(
-          unpacked.mscxContent,
-          file.name,
-          unpacked.fileFormat
-        );
-        const transformed = transformScoreXml(unpacked.mscxContent, analysis, options);
-        msczBuffer = await buildModifiedMsczBuffer(
-          rawBuffer,
-          file.name,
-          transformed.modifiedMscx
-        );
-        const cleanTitle = (options.headers.title.text || analysis.headers.title.text || 'Partitura')
-          .replace(/[<>:"/\\|?*]+/g, '')
-          .trim();
-        exportFileName = `${cleanTitle} - ${transformed.targetInstrument.name} (${transformed.writtenTonality.majorName}) - Rubsax.pdf`;
-      } else {
-        msczBuffer = rawBuffer;
-      }
+      rawBuffer = Buffer.from(arrayBuf);
+      modifiedMscxText = modifiedMscxField || undefined;
     } else {
       const body = await req.json();
-      const {
-        originalBase64,
-        fileName = 'partitura.mscz',
-        modifiedMscx,
-        options,
-        customPdfName,
-      } = body as {
+      const parsed = body as {
         originalBase64: string;
         fileName?: string;
         modifiedMscx?: string;
@@ -78,45 +61,99 @@ export async function POST(req: NextRequest) {
         customPdfName?: string;
       };
 
-      if (!originalBase64) {
+      if (!parsed.originalBase64) {
         return NextResponse.json(
           { error: 'Dados do arquivo original ausentes na requisição.' },
           { status: 400 }
         );
       }
 
-      const validation = validateUploadFileName(fileName);
+      uploadFileName = parsed.fileName || 'partitura.mscz';
+      const validation = validateUploadFileName(uploadFileName);
       if (!validation.valid) {
         return NextResponse.json({ error: validation.error }, { status: 400 });
       }
 
-      const rawBuffer = Buffer.from(originalBase64, 'base64');
-
-      if (modifiedMscx) {
-        msczBuffer = await buildModifiedMsczBuffer(rawBuffer, fileName, modifiedMscx);
-      } else if (options) {
-        const unpacked = await unpackScoreBuffer(rawBuffer, fileName);
-        const analysis = analyzeScoreXml(
-          unpacked.mscxContent,
-          fileName,
-          unpacked.fileFormat
-        );
-        const transformed = transformScoreXml(unpacked.mscxContent, analysis, options);
-        msczBuffer = await buildModifiedMsczBuffer(
-          rawBuffer,
-          fileName,
-          transformed.modifiedMscx
-        );
-      } else {
-        msczBuffer = rawBuffer;
-      }
-
-      if (customPdfName) {
-        exportFileName = customPdfName;
-      }
+      rawBuffer = Buffer.from(parsed.originalBase64, 'base64');
+      modifiedMscxText = parsed.modifiedMscx;
+      optionsObj = parsed.options;
+      customPdfName = parsed.customPdfName;
     }
 
-    const pdfBuffer = await runMuseScoreHeadlessPdf(msczBuffer);
+    const resolvedFileHash = crypto
+      .createHash('sha256')
+      .update(rawBuffer)
+      .digest('hex');
+
+    const [user, settings] = await Promise.all([
+      getServerSessionUser(),
+      getAppSettings(),
+    ]);
+
+    const access = await checkUserAccess(user, resolvedFileHash);
+
+    if (settings.operations.maintenance_mode && !access.isDev) {
+      return NextResponse.json(
+        {
+          error: settings.operations.maintenance_message,
+          code: 'MAINTENANCE_MODE',
+        },
+        { status: 503 }
+      );
+    }
+
+    // Censura blindada no servidor: bloqueia exportação em PDF para Modo Prévia
+    if (access.level === 'preview') {
+      return NextResponse.json(
+        { error: 'PAYWALL_REQUIRED' },
+        { status: 403 }
+      );
+    }
+
+    if (modifiedMscxText) {
+      msczBuffer = await buildModifiedMsczBuffer(rawBuffer, uploadFileName, modifiedMscxText);
+    } else if (optionsJson || optionsObj) {
+      const opts = optionsObj || (JSON.parse(optionsJson!) as ScoreTransformOptions);
+      const unpacked = await unpackScoreBuffer(rawBuffer, uploadFileName);
+      const analysis = analyzeScoreXml(
+        unpacked.mscxContent,
+        uploadFileName,
+        unpacked.fileFormat
+      );
+      const transformed = transformScoreXml(unpacked.mscxContent, analysis, opts);
+      msczBuffer = await buildModifiedMsczBuffer(
+        rawBuffer,
+        uploadFileName,
+        transformed.modifiedMscx
+      );
+      if (!customPdfName) {
+        const cleanTitle = (
+          opts.headers.title.text ||
+          analysis.headers.title.text ||
+          'Partitura'
+        )
+          .replace(/[<>:"/\\|?*]+/g, '')
+          .trim();
+        exportFileName = `${cleanTitle} - ${transformed.targetInstrument.name} (${transformed.writtenTonality.majorName}) - Rubsax.pdf`;
+      }
+    } else {
+      msczBuffer = rawBuffer;
+    }
+
+    if (customPdfName) {
+      exportFileName = customPdfName;
+    }
+
+    const pdfBuffer = await runMuseScoreHeadlessPdf(msczBuffer, {
+      isDev: access.isDev,
+    });
+
+    void logUsage({
+      userId: user?.id || null,
+      action: 'export_pdf',
+      fileHash: resolvedFileHash,
+      isDevMode: access.isDev,
+    });
 
     return new NextResponse(new Uint8Array(pdfBuffer), {
       status: 200,
