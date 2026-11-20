@@ -5,10 +5,13 @@ import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import type { ClientAuthUser } from '@/lib/supabase/client';
 import {
   AlertTriangle,
+  Ban,
+  CheckCircle2,
   Clock,
   Crown,
   Loader2,
   LogOut,
+  QrCode,
   ShieldAlert,
   Trash2,
   User,
@@ -24,6 +27,8 @@ interface AccountModalProps {
   activeSingleUnlocks: SingleUnlockRow[];
   onSignOut: () => Promise<void>;
   onAccountDeleted: () => void;
+  onSubscriptionUpdated?: () => void;
+  onRenewMonthlyPix?: () => void;
 }
 
 function formatCountdown(expiresAtIso: string | null): string {
@@ -43,12 +48,43 @@ export function AccountPanelContent({
   activeSingleUnlocks,
   onSignOut,
   onAccountDeleted,
+  onSubscriptionUpdated,
+  onRenewMonthlyPix,
 }: Omit<AccountModalProps, 'open' | 'onClose'>) {
+  const [confirmCancelSub, setConfirmCancelSub] = useState<boolean>(false);
+  const [cancellingSub, setCancellingSub] = useState<boolean>(false);
+  const [cancelMsg, setCancelMsg] = useState<string | null>(null);
+  const [cancelErr, setCancelErr] = useState<string | null>(null);
+
   const [confirmStep, setConfirmStep] = useState<0 | 1 | 2>(0);
   const [deleting, setDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   if (!user) return null;
+
+  const handleCancelSubscription = async () => {
+    setCancellingSub(true);
+    setCancelErr(null);
+    setCancelMsg(null);
+    try {
+      const res = await fetch('/api/subscriptions/cancel', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setCancelErr(data.error || 'Erro ao cancelar renovação automática.');
+        return;
+      }
+      const untilLabel = data.accessUntil
+        ? new Date(data.accessUntil).toLocaleDateString('pt-BR')
+        : 'o fim do período atual';
+      setCancelMsg(
+        `Renovação automática cancelada. Seu acesso completo permanece ativo até ${untilLabel}.`
+      );
+      setConfirmCancelSub(false);
+      onSubscriptionUpdated?.();
+    } finally {
+      setCancellingSub(false);
+    }
+  };
 
   const handleDeleteAccount = async () => {
     setDeleting(true);
@@ -106,10 +142,23 @@ export function AccountPanelContent({
       </div>
 
       {/* Plano Atual */}
-      <div className="p-4 rounded-2xl bg-studio-950 border border-zinc-800 space-y-2.5">
+      <div className="p-4 rounded-2xl bg-studio-950 border border-zinc-800 space-y-3">
         <span className="text-[11px] font-extrabold uppercase tracking-wider text-sax-400">
           Status do Seu Plano
         </span>
+
+        {cancelMsg && (
+          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{cancelMsg}</span>
+          </div>
+        )}
+
+        {cancelErr && (
+          <div className="p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-200 text-xs">
+            {cancelErr}
+          </div>
+        )}
 
         {isDev ? (
           <div className="flex items-center gap-2 text-sax-300 font-bold">
@@ -117,22 +166,86 @@ export function AccountPanelContent({
             <span>Modo Dev (Acesso Irrestrito do Proprietário)</span>
           </div>
         ) : activeSubscription ? (
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-emerald-400 font-extrabold">
-              <Crown className="w-4 h-4" />
-              <span>
-                {activeSubscription.plan_type === 'manual_vip'
-                  ? 'Acesso VIP Ativo (Cortesia)'
-                  : 'Assinante Mensal Completo'}
-              </span>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-emerald-400 font-extrabold">
+                <Crown className="w-4 h-4" />
+                <span>
+                  {activeSubscription.plan_type === 'manual_vip'
+                    ? 'Acesso VIP Ativo (Cortesia)'
+                    : activeSubscription.plan_type === 'monthly_pix'
+                    ? 'Plano Mensal Completo (Pix 30 dias)'
+                    : 'Assinante Mensal Completo (Cartão Recorrente)'}
+                </span>
+              </div>
+              {activeSubscription.current_period_end && (
+                <p className="text-xs text-zinc-400">
+                  Acesso liberado até:{' '}
+                  <strong className="text-zinc-200">
+                    {new Date(activeSubscription.current_period_end).toLocaleDateString('pt-BR')}
+                  </strong>
+                </p>
+              )}
+              {activeSubscription.cancel_at_period_end && (
+                <p className="text-xs text-amber-300 font-semibold">
+                  Renovação automática cancelada. Você não será cobrado novamente.
+                </p>
+              )}
             </div>
-            {activeSubscription.current_period_end && (
-              <p className="text-xs text-zinc-400">
-                Válido até:{' '}
-                <strong className="text-zinc-200">
-                  {new Date(activeSubscription.current_period_end).toLocaleDateString('pt-BR')}
-                </strong>
-              </p>
+
+            {/* Cancelamento em 1 clique para assinantes no cartão */}
+            {activeSubscription.plan_type === 'monthly_card' &&
+              !activeSubscription.cancel_at_period_end && (
+                <div>
+                  {!confirmCancelSub ? (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmCancelSub(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-bold transition"
+                    >
+                      <Ban className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Cancelar renovação automática</span>
+                    </button>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 space-y-2 text-xs">
+                      <p className="text-amber-100">
+                        Você continuará com acesso até o fim do período já pago. Confirmar
+                        cancelamento da próxima cobrança?
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={cancellingSub}
+                          onClick={() => void handleCancelSubscription()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-studio-950 font-extrabold disabled:opacity-50"
+                        >
+                          {cancellingSub && <Loader2 className="w-3 h-3 animate-spin" />}
+                          <span>Confirmar Cancelamento</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={cancellingSub}
+                          onClick={() => setConfirmCancelSub(false)}
+                          className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300"
+                        >
+                          Manter Assinatura
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+            {/* Renovar por +30 dias via Pix para plano monthly_pix */}
+            {activeSubscription.plan_type === 'monthly_pix' && onRenewMonthlyPix && (
+              <button
+                type="button"
+                onClick={onRenewMonthlyPix}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold transition"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>Renovar por +30 dias via Pix</span>
+              </button>
             )}
           </div>
         ) : (
@@ -302,6 +415,8 @@ export default function AccountModal(props: AccountModalProps) {
             activeSingleUnlocks={props.activeSingleUnlocks}
             onSignOut={props.onSignOut}
             onAccountDeleted={props.onAccountDeleted}
+            onSubscriptionUpdated={props.onSubscriptionUpdated}
+            onRenewMonthlyPix={props.onRenewMonthlyPix}
           />
         </div>
       </div>

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { checkUserAccess } from '@/lib/access';
+import { checkFairUseLimit } from '@/lib/fair-use';
 import {
   ScoreTransformOptions,
   analyzeScoreXml,
@@ -107,6 +108,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { error: 'PAYWALL_REQUIRED' },
         { status: 403 }
+      );
+    }
+
+    // Trava invisível de uso justo (anti-abuso para contas individuais)
+    const fairUse = await checkFairUseLimit(user, access.isDev);
+    if (!fairUse.allowed) {
+      return NextResponse.json(
+        {
+          error: fairUse.message,
+          code: 'FAIR_USE_LIMIT',
+          supportUrl: fairUse.supportUrl,
+        },
+        { status: 429 }
       );
     }
 

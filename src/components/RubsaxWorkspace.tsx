@@ -31,7 +31,7 @@ import ScoreViewer, { CanvasThemeMode } from './ScoreViewer';
 import BbEbChordModal from './BbEbChordModal';
 import EcosystemFooter from './EcosystemFooter';
 import AuthModal from './AuthModal';
-import PlansModal from './PlansModal';
+import PlansModal, { type PlanCheckoutKind } from './PlansModal';
 import AccountModal from './AccountModal';
 import {
   Upload,
@@ -110,6 +110,8 @@ export default function RubsaxWorkspace() {
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
   const [accountModalOpen, setAccountModalOpen] = useState<boolean>(false);
+  const [pendingPlanIntent, setPendingPlanIntent] =
+    useState<PlanCheckoutKind | null>(null);
 
   useEffect(() => {
     try {
@@ -794,6 +796,9 @@ export default function RubsaxWorkspace() {
           setPlansModalOpen(true);
           return;
         }
+        if (res.status === 429 && errData.supportUrl) {
+          throw new Error(`${errData.error} (${errData.supportUrl})`);
+        }
         throw new Error(errData.error || 'Erro ao exportar PDF no servidor.');
       }
 
@@ -1033,56 +1038,70 @@ export default function RubsaxWorkspace() {
                 </button>
 
                 {userMenuOpen && (
-                  <div
-                    className="absolute right-0 mt-2 w-52 rounded-2xl bg-studio-900 border border-zinc-700 shadow-2xl py-1.5 z-50 text-xs"
-                    onMouseLeave={() => setUserMenuOpen(false)}
-                  >
-                    <div className="px-3.5 py-2 border-b border-zinc-800">
-                      <p className="font-bold text-white truncate">
-                        {authUser.full_name || 'Músico Rubsax'}
-                      </p>
-                      <p className="text-[11px] text-zinc-400 truncate">{authUser.email}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setUserMenuOpen(false);
-                        setAccountModalOpen(true);
-                      }}
-                      className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2"
+                  <>
+                    <div
+                      className="hidden sm:block fixed inset-0 z-40"
+                      onClick={() => setUserMenuOpen(false)}
+                    />
+                    <div
+                      className="hidden sm:block absolute right-0 top-full mt-2 w-56 rounded-2xl bg-studio-900 border border-zinc-700 shadow-2xl py-1.5 z-50 text-xs"
+                      onMouseLeave={() => setUserMenuOpen(false)}
                     >
-                      <User className="w-3.5 h-3.5 text-sax-400" />
-                      <span>Minha Conta</span>
-                    </button>
-                    {isDev && (
-                      <Link
-                        href="/admin"
-                        onClick={() => setUserMenuOpen(false)}
-                        className="w-full px-3.5 py-2 hover:bg-zinc-800 text-sax-300 font-bold flex items-center gap-2"
+                      <div className="px-3.5 py-2 border-b border-zinc-800">
+                        <p className="font-bold text-white truncate">
+                          {authUser.full_name || 'Músico Rubsax'}
+                        </p>
+                        <p className="text-[11px] text-zinc-400 truncate">{authUser.email}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUserMenuOpen(false);
+                          setAccountModalOpen(true);
+                        }}
+                        className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2"
                       >
-                        <Shield className="w-3.5 h-3.5 text-sax-400" />
-                        <span>Painel /admin</span>
+                        <User className="w-3.5 h-3.5 text-sax-400" />
+                        <span>Minha Conta</span>
+                      </button>
+                      <Link
+                        href="/conta"
+                        onClick={() => setUserMenuOpen(false)}
+                        className="w-full px-3.5 py-2 hover:bg-zinc-800 text-zinc-300 font-medium flex items-center gap-2"
+                      >
+                        <Crown className="w-3.5 h-3.5 text-sax-400" />
+                        <span>Meu Plano &amp; Avulsos</span>
                       </Link>
-                    )}
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        setUserMenuOpen(false);
-                        await signOutUser();
-                        setAuthUser(null);
-                        setIsDev(false);
-                        setAccessLevel('preview');
-                        setActiveSubscription(null);
-                        setActiveSingleUnlocks([]);
-                        if (analysis) {
-                          setRenderVersion((v) => v + 1);
-                        }
-                      }}
-                      className="w-full px-3.5 py-2 text-left hover:bg-red-950/40 text-red-300 font-semibold border-t border-zinc-800 mt-1"
-                    >
-                      Sair da Conta
-                    </button>
-                  </div>
+                      {isDev && (
+                        <Link
+                          href="/admin"
+                          onClick={() => setUserMenuOpen(false)}
+                          className="w-full px-3.5 py-2 hover:bg-zinc-800 text-sax-300 font-bold flex items-center gap-2"
+                        >
+                          <Shield className="w-3.5 h-3.5 text-sax-400" />
+                          <span>Painel /admin</span>
+                        </Link>
+                      )}
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setUserMenuOpen(false);
+                          await signOutUser();
+                          setAuthUser(null);
+                          setIsDev(false);
+                          setAccessLevel('preview');
+                          setActiveSubscription(null);
+                          setActiveSingleUnlocks([]);
+                          if (analysis) {
+                            setRenderVersion((v) => v + 1);
+                          }
+                        }}
+                        className="w-full px-3.5 py-2 text-left hover:bg-red-950/40 text-red-300 font-semibold border-t border-zinc-800 mt-1"
+                      >
+                        Sair da Conta
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             )}
@@ -2840,24 +2859,120 @@ export default function RubsaxWorkspace() {
       {/* RODAPÉ INSTITUCIONAL COMPLETO E LINKS LEGAIS */}
       <EcosystemFooter supportLinks={appSettings.support_links} />
 
+      {/* MENU MOBILE DA CONTA (Renderizado na raiz para nunca ser cortado nas bordas da tela) */}
+      {authUser && userMenuOpen && (
+        <div
+          className="sm:hidden fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-end justify-center p-3 animate-fadeIn"
+          onClick={() => setUserMenuOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-studio-900 border border-zinc-700 shadow-2xl overflow-hidden text-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-4 py-3.5 border-b border-zinc-800 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="font-extrabold text-white truncate">
+                  {authUser.full_name || 'Músico Rubsax'}
+                </p>
+                <p className="text-xs text-zinc-400 truncate">{authUser.email}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUserMenuOpen(false)}
+                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300"
+                aria-label="Fechar menu"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-2 space-y-1 text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  setAccountModalOpen(true);
+                }}
+                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-zinc-800 text-zinc-100 font-bold flex items-center gap-2.5"
+              >
+                <User className="w-4 h-4 text-sax-400" />
+                <span>Minha Conta</span>
+              </button>
+              <Link
+                href="/conta"
+                onClick={() => setUserMenuOpen(false)}
+                className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2.5"
+              >
+                <Crown className="w-4 h-4 text-sax-400" />
+                <span>Meu Plano &amp; Músicas Avulsas</span>
+              </Link>
+              {isDev && (
+                <Link
+                  href="/admin"
+                  onClick={() => setUserMenuOpen(false)}
+                  className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-sax-300 font-extrabold flex items-center gap-2.5"
+                >
+                  <Shield className="w-4 h-4 text-sax-400" />
+                  <span>Painel /admin</span>
+                </Link>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  setUserMenuOpen(false);
+                  await signOutUser();
+                  setAuthUser(null);
+                  setIsDev(false);
+                  setAccessLevel('preview');
+                  setActiveSubscription(null);
+                  setActiveSingleUnlocks([]);
+                  if (analysis) setRenderVersion((v) => v + 1);
+                }}
+                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-red-950/40 text-red-300 font-bold border-t border-zinc-800 mt-1"
+              >
+                Sair da Conta
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAIS DE AUTENTICAÇÃO, PLANOS E ÁREA DO CLIENTE */}
       <AuthModal
         open={authModalOpen}
-        onClose={() => setAuthModalOpen(false)}
+        onClose={() => {
+          setAuthModalOpen(false);
+          setPendingPlanIntent(null);
+        }}
         onAuthenticated={(u) => {
           setAuthUser(u);
           void refreshAuthAndSettings(fileHash, Boolean(analysis));
+          if (pendingPlanIntent) {
+            setPlansModalOpen(true);
+          }
         }}
       />
 
       <PlansModal
         open={plansModalOpen}
-        onClose={() => setPlansModalOpen(false)}
+        onClose={() => {
+          setPlansModalOpen(false);
+          setPendingPlanIntent(null);
+        }}
         user={authUser}
         pricing={appSettings.pricing}
         paywall={appSettings.paywall}
+        fileHash={fileHash}
         fileName={analysis?.fileName}
-        onRequireLogin={() => setAuthModalOpen(true)}
+        initialPlanToStart={pendingPlanIntent}
+        onRequireLogin={(pendingPlan) => {
+          setPendingPlanIntent(pendingPlan || null);
+          setAuthModalOpen(true);
+        }}
+        onPaymentApproved={() => {
+          setPendingPlanIntent(null);
+          void refreshAuthAndSettings(fileHash, Boolean(analysis));
+        }}
       />
 
       <AccountModal
@@ -2885,6 +3000,14 @@ export default function RubsaxWorkspace() {
           setActiveSubscription(null);
           setActiveSingleUnlocks([]);
           if (analysis) setRenderVersion((v) => v + 1);
+        }}
+        onSubscriptionUpdated={() => {
+          void refreshAuthAndSettings(fileHash);
+        }}
+        onRenewMonthlyPix={() => {
+          setAccountModalOpen(false);
+          setPendingPlanIntent('monthly_pix');
+          setPlansModalOpen(true);
         }}
       />
 

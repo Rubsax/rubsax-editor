@@ -20,7 +20,7 @@ export interface SubscriptionRow {
   id: string;
   user_id: string;
   plan_type: SubscriptionPlanType;
-  status: 'active' | 'cancelled' | 'expired' | 'past_due';
+  status: 'pending' | 'active' | 'cancelled' | 'expired' | 'past_due';
   mp_preapproval_id: string | null;
   mp_last_payment_id: string | null;
   current_period_start: string | null;
@@ -53,10 +53,16 @@ export interface PaymentRow {
   created_at: string;
 }
 
+export type ConsentType =
+  | 'copyright_upload'
+  | 'privacy_terms'
+  | 'checkout_purchase'
+  | 'checkout_subscription';
+
 export interface LegalConsentRow {
   id?: string;
   user_id: string | null;
-  consent_type: 'copyright_upload' | 'privacy_terms';
+  consent_type: ConsentType;
   terms_version: string;
   file_hash: string | null;
   accepted_at?: string;
@@ -186,7 +192,7 @@ export async function logUsage(params: {
 
 export async function logLegalConsent(params: {
   userId?: string | null;
-  consentType: 'copyright_upload' | 'privacy_terms';
+  consentType: ConsentType;
   termsVersion: string;
   fileHash?: string | null;
 }): Promise<void> {

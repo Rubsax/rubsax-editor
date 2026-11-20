@@ -1,13 +1,15 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AccountPanelContent } from '@/components/AccountModal';
 import AuthModal from '@/components/AuthModal';
+import PlansModal, { PlanCheckoutKind } from '@/components/PlansModal';
+import { DEFAULT_APP_SETTINGS, type AppSettings } from '@/lib/settings';
 import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import { ClientAuthUser, signOutUser } from '@/lib/supabase/client';
-import { ArrowLeft, Loader2, LogIn, User } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Loader2, LogIn, User } from 'lucide-react';
 
 export default function ContaPage() {
   const router = useRouter();
@@ -16,9 +18,13 @@ export default function ContaPage() {
   const [isDev, setIsDev] = useState<boolean>(false);
   const [activeSub, setActiveSub] = useState<SubscriptionRow | null>(null);
   const [activeUnlocks, setActiveUnlocks] = useState<SingleUnlockRow[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
+  const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
+  const [initialPlan, setInitialPlan] = useState<PlanCheckoutKind | null>(null);
+  const [returnBanner, setReturnBanner] = useState<string | null>(null);
 
-  const loadAccount = async () => {
+  const loadAccount = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/auth/me', { cache: 'no-store' });
@@ -28,15 +34,46 @@ export default function ContaPage() {
         setIsDev(Boolean(data.isDev));
         setActiveSub(data.activeSubscription || null);
         setActiveUnlocks(data.activeSingleUnlocks || []);
+        if (data.settings) {
+          setAppSettings((prev) => ({
+            ...prev,
+            pricing: data.settings.pricing || prev.pricing,
+            paywall: data.settings.paywall || prev.paywall,
+          }));
+        }
       }
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    void loadAccount();
-  }, []);
+    const syncReturnAndLoad = async () => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('assinatura') === 'processando') {
+          setReturnBanner('Verificando confirmação da sua assinatura junto ao Mercado Pago...');
+          const syncRes = await fetch('/api/checkout/status?syncSubscription=1', {
+            cache: 'no-store',
+          });
+          if (syncRes.ok) {
+            const syncData = await syncRes.json();
+            if (syncData.unlocked) {
+              setReturnBanner('Assinatura confirmada e ativa na sua conta!');
+            } else {
+              setReturnBanner(
+                'Recebemos sua assinatura! Assim que o Mercado Pago confirmar a operação, o acesso aparecerá ativo aqui.'
+              );
+            }
+          }
+        }
+      } catch {
+        // Ignora erro de sync inicial
+      }
+      await loadAccount();
+    };
+    void syncReturnAndLoad();
+  }, [loadAccount]);
 
   return (
     <div className="min-h-screen bg-studio-950 text-zinc-100 flex flex-col">
@@ -53,7 +90,14 @@ export default function ContaPage() {
         </div>
       </header>
 
-      <main className="flex-1 max-w-2xl w-full mx-auto px-4 py-8">
+      <main className="flex-1 max-w-2xl w-full mx-auto px-4 py-8 space-y-4">
+        {returnBanner && (
+          <div className="p-3.5 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200 text-xs sm:text-sm flex items-center gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{returnBanner}</span>
+          </div>
+        )}
+
         {loading ? (
           <div className="py-16 flex items-center justify-center gap-2 text-zinc-400 text-sm">
             <Loader2 className="w-5 h-5 animate-spin text-sax-400" />
@@ -68,8 +112,7 @@ export default function ContaPage() {
               Entre para acessar Minha Conta
             </h1>
             <p className="text-xs sm:text-sm text-zinc-400">
-              Visualize seu plano atual, músicas avulsas desbloqueadas e configurações de
-              privacidade LGPD.
+              Visualize seu plano atual, cancele ou renove sua assinatura e gerencie seus dados LGPD.
             </p>
             <button
               type="button"
@@ -96,6 +139,13 @@ export default function ContaPage() {
                 setUser(null);
                 router.push('/');
               }}
+              onSubscriptionUpdated={() => {
+                void loadAccount();
+              }}
+              onRenewMonthlyPix={() => {
+                setInitialPlan('monthly_pix');
+                setPlansModalOpen(true);
+              }}
             />
           </div>
         )}
@@ -105,6 +155,22 @@ export default function ContaPage() {
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
         onAuthenticated={() => {
+          void loadAccount();
+        }}
+      />
+
+      <PlansModal
+        open={plansModalOpen}
+        onClose={() => {
+          setPlansModalOpen(false);
+          setInitialPlan(null);
+        }}
+        user={user}
+        pricing={appSettings.pricing}
+        paywall={appSettings.paywall}
+        initialPlanToStart={initialPlan}
+        onRequireLogin={() => setAuthModalOpen(true)}
+        onPaymentApproved={() => {
           void loadAccount();
         }}
       />
