@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { getAppSettings } from './settings';
 import {
   PaymentRow,
+  SingleUnlockRow,
   SubscriptionRow,
   isSupabaseConfigured,
   supabaseAdminFetch,
@@ -67,35 +68,112 @@ export interface MpPreapprovalResponse {
   };
 }
 
+interface MpErrorEntry {
+  code?: string | number;
+  message?: string;
+  description?: string;
+  details?: string[] | string;
+}
+
+interface MpCauseEntry {
+  code?: string | number;
+  description?: string;
+  message?: string;
+}
+
+interface MpErrorPayload {
+  message?: string;
+  error?: string;
+  errors?: MpErrorEntry[];
+  cause?: MpCauseEntry[] | string | Record<string, unknown>;
+}
+
+function formatMpApiError(data: MpErrorPayload, fallback: string): string {
+  const parts: string[] = [];
+
+  if (Array.isArray(data.errors) && data.errors.length > 0) {
+    for (const entry of data.errors) {
+      const chunks: string[] = [];
+      if (entry.code !== undefined && entry.code !== null && String(entry.code).trim()) {
+        chunks.push(`[${entry.code}]`);
+      }
+      const msg = entry.message || entry.description;
+      if (msg) chunks.push(msg);
+
+      if (Array.isArray(entry.details) && entry.details.length > 0) {
+        const detailText = entry.details
+          .map((d) => (typeof d === 'string' ? d : JSON.stringify(d)))
+          .filter(Boolean)
+          .join(', ');
+        if (detailText) chunks.push(`details: ${detailText}`);
+      } else if (typeof entry.details === 'string' && entry.details.trim()) {
+        chunks.push(`details: ${entry.details.trim()}`);
+      }
+
+      if (chunks.length > 0) {
+        parts.push(chunks.join(' '));
+      }
+    }
+  }
+
+  if (Array.isArray(data.cause) && data.cause.length > 0) {
+    for (const causeItem of data.cause) {
+      if (causeItem && typeof causeItem === 'object') {
+        const codePart =
+          causeItem.code !== undefined && causeItem.code !== null
+            ? `[${causeItem.code}] `
+            : '';
+        const text = causeItem.description || causeItem.message;
+        if (text) {
+          parts.push(`cause: ${codePart}${text}`);
+        } else {
+          parts.push(`cause: ${JSON.stringify(causeItem)}`);
+        }
+      } else if (causeItem) {
+        parts.push(`cause: ${String(causeItem)}`);
+      }
+    }
+  } else if (typeof data.cause === 'string' && data.cause.trim()) {
+    parts.push(`cause: ${data.cause.trim()}`);
+  } else if (data.cause && typeof data.cause === 'object') {
+    parts.push(`cause: ${JSON.stringify(data.cause)}`);
+  }
+
+  const baseMessage = data.message || data.error || '';
+  if (parts.length > 0) {
+    if (baseMessage && !parts.some((p) => p.includes(baseMessage))) {
+      return `${baseMessage} (${parts.join(' | ')})`;
+    }
+    return parts.join(' | ');
+  }
+
+  return baseMessage || fallback;
+}
+
 export async function createPixOrder(params: {
   amountBrl: number;
-  description: string;
   externalReference: string;
   payerEmail: string;
-  payerFirstName?: string | null;
-  payerLastName?: string | null;
   expirationMinutes?: number;
 }): Promise<PixOrderResult> {
   const token = getMpAccessToken();
-  const amountStr = Number(params.amountBrl).toFixed(2);
-  const expMinutes = Math.max(5, Math.min(1440, params.expirationMinutes || 30));
+  const totalAmountStr = Number(params.amountBrl).toFixed(2);
+  const expMinutes = Math.max(30, Math.min(1440, params.expirationMinutes || 30));
+  const cleanExternalRef = params.externalReference.trim().slice(0, 64);
 
   const payload = {
     type: 'online',
     processing_mode: 'automatic',
-    external_reference: params.externalReference,
-    description: params.description.slice(0, 140),
-    total_amount: amountStr,
+    total_amount: totalAmountStr,
+    external_reference: cleanExternalRef,
+    expiration_time: `PT${expMinutes}M`,
     payer: {
-      email: params.payerEmail,
-      first_name: (params.payerFirstName || 'Cliente').slice(0, 60),
-      last_name: (params.payerLastName || 'Rubsax').slice(0, 60),
+      email: params.payerEmail.trim(),
     },
     transactions: {
       payments: [
         {
-          amount: amountStr,
-          expiration_time: `PT${expMinutes}M`,
+          amount: totalAmountStr,
           payment_method: {
             id: 'pix',
             type: 'bank_transfer',
@@ -116,17 +194,27 @@ export async function createPixOrder(params: {
     cache: 'no-store',
   });
 
-  const data = (await res.json().catch(() => ({}))) as MpOrderResponse & {
-    errors?: Array<{ message?: string; description?: string }>;
-    message?: string;
-  };
+  const rawText = await res.text();
+  let data: Partial<MpOrderResponse> & MpErrorPayload = {};
+  try {
+    data = rawText
+      ? (JSON.parse(rawText) as Partial<MpOrderResponse> & MpErrorPayload)
+      : {};
+  } catch {
+    data = { message: rawText || undefined };
+  }
 
   if (!res.ok || !data.id) {
-    const errMsg =
-      data.errors?.map((e) => e.message || e.description).filter(Boolean).join('; ') ||
-      data.message ||
-      `Erro HTTP ${res.status} ao criar Order Pix no Mercado Pago.`;
-    throw new Error(errMsg);
+    console.error(
+      `[MP createPixOrder] HTTP ${res.status} - resposta completa:`,
+      rawText || JSON.stringify(data)
+    );
+    throw new Error(
+      formatMpApiError(
+        data,
+        `Erro HTTP ${res.status} ao criar Order Pix no Mercado Pago.`
+      )
+    );
   }
 
   const firstPayment = data.transactions?.payments?.[0];
@@ -202,13 +290,26 @@ export async function createRecurringSubscription(params: {
     cache: 'no-store',
   });
 
-  const data = (await res.json().catch(() => ({}))) as MpPreapprovalResponse & {
-    message?: string;
-  };
+  const rawText = await res.text();
+  let data: Partial<MpPreapprovalResponse> & MpErrorPayload = {};
+  try {
+    data = rawText
+      ? (JSON.parse(rawText) as Partial<MpPreapprovalResponse> & MpErrorPayload)
+      : {};
+  } catch {
+    data = { message: rawText || undefined };
+  }
 
   if (!res.ok || !data.id || !data.init_point) {
+    console.error(
+      `[MP createRecurringSubscription] HTTP ${res.status} - resposta completa:`,
+      rawText || JSON.stringify(data)
+    );
     throw new Error(
-      data.message || `Erro HTTP ${res.status} ao criar assinatura no Mercado Pago.`
+      formatMpApiError(
+        data,
+        `Erro HTTP ${res.status} ao criar assinatura no Mercado Pago.`
+      )
     );
   }
 
@@ -397,6 +498,8 @@ export function isMpOrderRefundedOrCancelled(order: MpOrderResponse): boolean {
   );
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Concilia de forma idempotente uma Order Pix no Supabase.
  * Pode ser chamada simultaneamente pelo Webhook e pelo polling do cliente sem duplicar dias.
@@ -410,11 +513,12 @@ export async function reconcileMpOrder(order: MpOrderResponse): Promise<{
   }
 
   const orderId = String(order.id);
+  const rawExtRef = (order.external_reference || '').trim();
   const settings = await getAppSettings();
   const paid = isMpOrderPaid(order);
   const cancelledOrRefunded = isMpOrderRefundedOrCancelled(order);
 
-  // Localizar registro em payments pelo mp_payment_id ou pelo paymentRowId em external_reference
+  // Localizar registro em payments por mp_payment_id = order.id OU id = order.external_reference
   let paymentRow: PaymentRow | null = null;
   const byMpRes = await supabaseAdminFetch(
     `/rest/v1/payments?mp_payment_id=eq.${encodeURIComponent(orderId)}&limit=1`
@@ -424,10 +528,15 @@ export async function reconcileMpOrder(order: MpOrderResponse): Promise<{
     if (rows.length > 0) paymentRow = rows[0];
   }
 
-  const extParts = (order.external_reference || '').split(':');
-  const extKind = extParts[0];
-  const extUserId = extParts[1];
-  const extPaymentId = extParts[2];
+  let extPaymentId = '';
+  if (UUID_REGEX.test(rawExtRef)) {
+    extPaymentId = rawExtRef;
+  } else if (rawExtRef.includes(':')) {
+    const legacyPart = (rawExtRef.split(':')[2] || '').trim();
+    if (UUID_REGEX.test(legacyPart)) {
+      extPaymentId = legacyPart;
+    }
+  }
 
   if (!paymentRow && extPaymentId) {
     const byIdRes = await supabaseAdminFetch(
@@ -440,7 +549,10 @@ export async function reconcileMpOrder(order: MpOrderResponse): Promise<{
   }
 
   if (!paymentRow) {
-    return { status: paid ? 'approved' : 'pending', unlocked: paid };
+    console.warn(
+      `[MP Reconcile] Pagamento não localizado em payments para order.id=${orderId}, external_reference=${rawExtRef || '(vazio)'}`
+    );
+    return { status: paid ? 'approved' : 'pending', unlocked: false };
   }
 
   if (cancelledOrRefunded) {
@@ -502,25 +614,53 @@ export async function reconcileMpOrder(order: MpOrderResponse): Promise<{
     return { status: 'approved', unlocked: true };
   }
 
-  const targetUserId = paymentRow.user_id || extUserId;
-  const resolvedKind =
-    paymentRow.kind || (extKind === 'monthly_pix' ? 'monthly_pix' : 'single_24h');
+  const targetUserId = paymentRow.user_id;
+  const resolvedKind = paymentRow.kind;
 
   if (resolvedKind === 'single_24h') {
     const hours = Math.max(1, settings.pricing.single_duration_hours || 24);
     const expiresAt = new Date(now.getTime() + hours * 60 * 60 * 1000).toISOString();
 
-    await supabaseAdminFetch(
+    const unlockPatchRes = await supabaseAdminFetch(
       `/rest/v1/single_unlocks?mp_payment_id=eq.${encodeURIComponent(orderId)}`,
       {
         method: 'PATCH',
-        headers: { Prefer: 'return=minimal' },
+        headers: { Prefer: 'return=representation' },
         body: JSON.stringify({
           status: 'approved',
           expires_at: expiresAt,
         }),
       }
     );
+
+    const updatedUnlocks = unlockPatchRes.ok
+      ? ((await unlockPatchRes.json()) as SingleUnlockRow[])
+      : [];
+
+    if (updatedUnlocks.length === 0 && targetUserId) {
+      const pendingUnlockRes = await supabaseAdminFetch(
+        `/rest/v1/single_unlocks?user_id=eq.${encodeURIComponent(
+          targetUserId
+        )}&status=eq.pending&order=created_at.desc&limit=1`
+      );
+      const pendingUnlocks = pendingUnlockRes.ok
+        ? ((await pendingUnlockRes.json()) as SingleUnlockRow[])
+        : [];
+      if (pendingUnlocks[0]?.id) {
+        await supabaseAdminFetch(
+          `/rest/v1/single_unlocks?id=eq.${encodeURIComponent(pendingUnlocks[0].id)}`,
+          {
+            method: 'PATCH',
+            headers: { Prefer: 'return=minimal' },
+            body: JSON.stringify({
+              status: 'approved',
+              expires_at: expiresAt,
+              mp_payment_id: orderId,
+            }),
+          }
+        );
+      }
+    }
   } else if (resolvedKind === 'monthly_pix' && targetUserId) {
     await extendOrActivateMonthlySubscription({
       userId: targetUserId,

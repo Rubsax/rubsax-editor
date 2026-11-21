@@ -145,22 +145,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Criar Order Pix na API /v1/orders do Mercado Pago
-    const nameParts = (user.full_name || 'Músico Rubsax').trim().split(/\s+/);
-    const firstName = nameParts[0] || 'Músico';
-    const lastName = nameParts.slice(1).join(' ') || 'Rubsax';
-    const externalReference = `${kind}:${user.id}:${paymentRow.id}`;
-    const description =
-      kind === 'single'
-        ? `Rubsax Transposer - Desbloqueio Avulso (${settings.pricing.single_duration_hours}h)`
-        : 'Rubsax Transposer - Plano Mensal Completo (30 dias Pix)';
-
+    // Passa apenas o UUID puro de payments.id (36 chars) como external_reference
     const order = await createPixOrder({
       amountBrl,
-      description,
-      externalReference,
+      externalReference: paymentRow.id,
       payerEmail: user.email,
-      payerFirstName: firstName,
-      payerLastName: lastName,
       expirationMinutes: 30,
     });
 

@@ -49,11 +49,11 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. Eventos da API de Orders (Pix Avulso e Mensal Pix)
-    if (eventType === 'order' || action.startsWith('order.')) {
+    if (eventType === 'order' || eventType === 'orders' || action.startsWith('order.')) {
       const order = await getOrderById(dataId);
       const res = await reconcileMpOrder(order);
       console.log(
-        `[MP Webhook] Order ${dataId} (${action || eventType}) -> status=${res.status}, unlocked=${res.unlocked}`
+        `[MP Webhook] Order ${order.id} (ext=${order.external_reference || '-'}, mp_status=${order.status || '-'}, event=${action || eventType}) -> status=${res.status}, unlocked=${res.unlocked}`
       );
       return NextResponse.json({ received: true, ...res }, { status: 200 });
     }
