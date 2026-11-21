@@ -2,15 +2,19 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import AdminCharts, { DailySeriesPoint, TxStatusCounts } from '@/components/AdminCharts';
+import SmartBackButton from '@/components/SmartBackButton';
 import type { AppSettings } from '@/lib/settings';
 import { DEFAULT_APP_SETTINGS } from '@/lib/settings';
 import type { MuseScoreQueueStats } from '@/lib/mscore-queue';
+import { extractYouTubeVideoId } from '@/lib/youtube';
 import {
-  ArrowLeft,
   BarChart3,
   CheckCircle2,
   Crown,
+  Download,
   Loader2,
+  PlayCircle,
   RefreshCw,
   Save,
   Search,
@@ -23,6 +27,8 @@ import {
 } from 'lucide-react';
 
 type AdminTab = 'overview' | 'settings' | 'users' | 'system';
+type OverviewPeriod = '7' | '30' | '90' | 'all';
+type TxStatusFilter = 'all' | 'approved' | 'pending' | 'expired' | 'rejected';
 
 interface OverviewMetrics {
   revenueToday: number;
@@ -38,12 +44,14 @@ interface OverviewMetrics {
   pdfsToday: number;
   pdfsMonth: number;
   previewsToday: number;
+  uniquePreviewScoresToday: number;
   fullRendersToday: number;
 }
 
 interface TransactionItem {
   id: string;
   user_email: string;
+  mp_payment_id?: string | null;
   kind: string;
   amount_brl: number;
   status: string;
@@ -78,13 +86,87 @@ function formatBRL(val: number): string {
   return val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+function downloadCsvPtBr(
+  filename: string,
+  headers: string[],
+  rows: Array<Array<string | number | null | undefined>>
+): void {
+  const escapeCell = (val: string | number | null | undefined): string => {
+    const raw = val === null || val === undefined ? '' : String(val);
+    const needsQuotes = raw.includes(';') || raw.includes('"') || raw.includes('\n');
+    const escaped = raw.replace(/"/g, '""');
+    return needsQuotes ? `"${escaped}"` : escaped;
+  };
+  const lines = [
+    headers.map(escapeCell).join(';'),
+    ...rows.map((r) => r.map(escapeCell).join(';')),
+  ];
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], {
+    type: 'text/csv;charset=utf-8;',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function renderStatusBadge(status: string) {
+  if (status === 'approved') {
+    return (
+      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+        approved
+      </span>
+    );
+  }
+  if (status === 'pending') {
+    return (
+      <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+        pending
+      </span>
+    );
+  }
+  if (status === 'expired') {
+    return (
+      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-700/50 text-zinc-300 border border-zinc-600">
+        expired
+      </span>
+    );
+  }
+  return (
+    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-red-500/15 text-red-300 border border-red-500/30">
+      {status}
+    </span>
+  );
+}
+
 export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   const [tab, setTab] = useState<AdminTab>('overview');
+  const [periodDays, setPeriodDays] = useState<OverviewPeriod>('30');
+  const [txFilter, setTxFilter] = useState<TxStatusFilter>('all');
   const [loadingOverview, setLoadingOverview] = useState<boolean>(true);
   const [configured, setConfigured] = useState<boolean>(true);
+  const [expiredConstraintPending, setExpiredConstraintPending] =
+    useState<boolean>(false);
   const [metrics, setMetrics] = useState<OverviewMetrics | null>(null);
+  const [txCounts, setTxCounts] = useState<TxStatusCounts>({
+    approved: 0,
+    pending: 0,
+    expired: 0,
+    rejected: 0,
+    pixApproved: 0,
+    cardApproved: 0,
+  });
+  const [dailySeries, setDailySeries] = useState<DailySeriesPoint[]>([]);
   const [recentTransactions, setRecentTransactions] = useState<TransactionItem[]>([]);
+  const [allPeriodTransactions, setAllPeriodTransactions] = useState<TransactionItem[]>(
+    []
+  );
   const [recentUsage, setRecentUsage] = useState<UsageItem[]>([]);
+  const [allPeriodUsage, setAllPeriodUsage] = useState<UsageItem[]>([]);
   const [queueStats, setQueueStats] = useState<MuseScoreQueueStats | null>(null);
 
   // Settings editor
@@ -106,21 +188,31 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   const [cleaningTmp, setCleaningTmp] = useState<boolean>(false);
   const [tmpResultMsg, setTmpResultMsg] = useState<string | null>(null);
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (days: OverviewPeriod = periodDays) => {
     setLoadingOverview(true);
     try {
-      const res = await fetch('/api/admin/overview', { cache: 'no-store' });
+      const res = await fetch(
+        `/api/admin/overview?days=${encodeURIComponent(days)}`,
+        { cache: 'no-store' }
+      );
       if (!res.ok) return;
       const data = await res.json();
       setConfigured(data.configured !== false);
+      setExpiredConstraintPending(Boolean(data.expiredConstraintPending));
       setMetrics(data.metrics || null);
+      if (data.txCounts) setTxCounts(data.txCounts);
+      setDailySeries(data.dailySeries || []);
       setRecentTransactions(data.recentTransactions || []);
+      setAllPeriodTransactions(
+        data.allPeriodTransactions || data.recentTransactions || []
+      );
       setRecentUsage(data.recentUsage || []);
+      setAllPeriodUsage(data.allPeriodUsage || data.recentUsage || []);
       setQueueStats(data.queue || null);
     } finally {
       setLoadingOverview(false);
     }
-  }, []);
+  }, [periodDays]);
 
   const loadSettings = useCallback(async () => {
     const res = await fetch('/api/admin/settings', { cache: 'no-store' });
@@ -154,10 +246,13 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
   }, []);
 
   useEffect(() => {
-    void loadOverview();
+    void loadOverview(periodDays);
+  }, [loadOverview, periodDays]);
+
+  useEffect(() => {
     void loadSettings();
     void loadUsers('');
-  }, [loadOverview, loadSettings, loadUsers]);
+  }, [loadSettings, loadUsers]);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -240,18 +335,94 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
     }
   };
 
+  const filteredTransactions = recentTransactions.filter((t) => {
+    if (txFilter === 'all') return true;
+    if (txFilter === 'rejected') {
+      return t.status === 'rejected' || t.status === 'refunded';
+    }
+    return t.status === txFilter;
+  });
+
+  const handleExportTransactionsCsv = () => {
+    downloadCsvPtBr(
+      `rubsax-transacoes-${periodDays}d.csv`,
+      ['ID', 'Usuário', 'Tipo', 'Valor (BRL)', 'Status', 'MP Payment ID', 'Pago em', 'Criado em'],
+      allPeriodTransactions.map((t) => [
+        t.id,
+        t.user_email,
+        t.kind,
+        Number(t.amount_brl || 0).toFixed(2).replace('.', ','),
+        t.status,
+        t.mp_payment_id || '',
+        t.paid_at ? new Date(t.paid_at).toLocaleString('pt-BR') : '',
+        new Date(t.created_at).toLocaleString('pt-BR'),
+      ])
+    );
+  };
+
+  const handleExportUsageCsv = () => {
+    downloadCsvPtBr(
+      `rubsax-uso-${periodDays}d.csv`,
+      ['ID', 'Usuário', 'Ação', 'Hash Partitura', 'Data'],
+      allPeriodUsage.map((u) => [
+        u.id,
+        u.user_email,
+        u.action,
+        u.file_hash,
+        new Date(u.created_at).toLocaleString('pt-BR'),
+      ])
+    );
+  };
+
+  const handleExportUsersCsv = () => {
+    downloadCsvPtBr(
+      'rubsax-usuarios.csv',
+      ['ID', 'E-mail', 'Nome', 'Tipo Acesso', 'Validade', 'Avulsos Ativos', 'Criado em'],
+      usersList.map((u) => [
+        u.id,
+        u.email || '',
+        u.full_name || '',
+        u.isAdmin
+          ? 'Admin / Dev'
+          : u.activeSubscription
+          ? u.activeSubscription.plan_type
+          : u.activeSingleUnlocksCount > 0
+          ? 'Avulso 24h'
+          : 'Prévia',
+        u.activeSubscription?.current_period_end
+          ? new Date(u.activeSubscription.current_period_end).toLocaleDateString('pt-BR')
+          : '',
+        u.activeSingleUnlocksCount,
+        new Date(u.created_at).toLocaleDateString('pt-BR'),
+      ])
+    );
+  };
+
+  const extractedTutorialId = extractYouTubeVideoId(settingsForm.tutorial.youtube_input);
+
   return (
     <div className="min-h-screen bg-studio-950 text-zinc-100 flex flex-col">
       {/* Header Admin */}
       <header className="sticky top-0 z-30 bg-studio-900/95 backdrop-blur-md border-b border-zinc-800 px-4 sm:px-6 py-3">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <Link
-              href="/"
+            <SmartBackButton
+              currentPath="/admin"
+              label="Voltar"
+              fallbackHref="/?view=editor"
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-semibold text-zinc-200 border border-zinc-700 transition"
+            />
+            <Link
+              href="/?view=home"
+              title="Ir para a Tela Inicial"
+              className="w-8 h-8 rounded-xl bg-gradient-to-br from-sax-400 to-sax-600 p-1 flex items-center justify-center shadow-md overflow-hidden shrink-0 hover:opacity-90 transition"
             >
-              <ArrowLeft className="w-3.5 h-3.5 text-sax-400" />
-              <span>Voltar ao Editor</span>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/icon.png"
+                alt="Rubsax Logo"
+                className="w-full h-full object-contain rounded"
+              />
             </Link>
             <div>
               <div className="flex items-center gap-2">
@@ -266,17 +437,26 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              void loadOverview();
-              void loadSystemStats();
-            }}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-sax-300 border border-zinc-700 transition"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? 'animate-spin' : ''}`} />
-            <span>Atualizar</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/?view=editor"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 text-xs font-bold text-sax-300 border border-sax-500/40 transition"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Ir ao Editor</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => {
+                void loadOverview(periodDays);
+                void loadSystemStats();
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-sax-300 border border-zinc-700 transition"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingOverview ? 'animate-spin' : ''}`} />
+              <span>Atualizar</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -321,9 +501,78 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
           })}
         </div>
 
-        {/* ABA 1: VISÃO GERAL (MÉTRICAS) */}
+        {/* ABA 1: VISÃO GERAL (MÉTRICAS, GRÁFICOS E EXPORTAÇÃO CSV) */}
         {tab === 'overview' && (
           <div className="space-y-6">
+            {/* Barra de Filtro de Período e Botões de Exportação CSV */}
+            <div className="flex flex-wrap items-center justify-between gap-3 p-3.5 rounded-2xl bg-studio-900 border border-zinc-800">
+              <div className="flex items-center gap-1.5 flex-wrap text-xs">
+                <span className="text-zinc-400 font-semibold mr-1">Período:</span>
+                {(
+                  [
+                    { id: '7', label: '7 dias' },
+                    { id: '30', label: '30 dias' },
+                    { id: '90', label: '90 dias' },
+                    { id: 'all', label: 'Tudo' },
+                  ] as const
+                ).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setPeriodDays(p.id)}
+                    className={`px-3 py-1.5 rounded-lg font-bold border transition ${
+                      periodDays === p.id
+                        ? 'bg-[#D97706] text-studio-950 border-sax-400'
+                        : 'bg-studio-950 text-zinc-300 border-zinc-700 hover:bg-zinc-800'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap text-xs">
+                <button
+                  type="button"
+                  onClick={handleExportTransactionsCsv}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-emerald-300 font-bold border border-zinc-700 transition"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Transações (CSV)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportUsageCsv}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sky-300 font-bold border border-zinc-700 transition"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Uso (CSV)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportUsersCsv}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sax-300 font-bold border border-zinc-700 transition"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Usuários (CSV)</span>
+                </button>
+              </div>
+            </div>
+
+            {expiredConstraintPending && (
+              <div className="p-3.5 rounded-2xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-1">
+                <p className="font-bold">
+                  Observação do Supabase: as cobranças vencidas já estão sendo exibidas como{' '}
+                  <code className="text-white">expired</code> aqui no painel. Para gravar{' '}
+                  <code className="text-white">expired</code> permanentemente no banco, rode no SQL
+                  Editor do Supabase:
+                </p>
+                <pre className="p-2 rounded-lg bg-black/50 font-mono text-[11px] text-amber-100 overflow-x-auto">
+                  {`ALTER TABLE public.payments DROP CONSTRAINT IF EXISTS payments_status_check;\nALTER TABLE public.payments ADD CONSTRAINT payments_status_check CHECK (status IN ('pending','approved','refunded','rejected','expired'));`}
+                </pre>
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="p-4 rounded-2xl bg-studio-900 border border-zinc-800">
                 <span className="text-[11px] uppercase font-bold text-zinc-400">
@@ -365,51 +614,86 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
 
               <div className="p-4 rounded-2xl bg-studio-900 border border-zinc-800">
                 <span className="text-[11px] uppercase font-bold text-zinc-400">
-                  PDFs Exportados (Sem Modo Dev)
+                  PDFs &amp; Prévias Únicas (Sem Modo Dev)
                 </span>
                 <p className="text-xl font-extrabold text-sky-400 mt-1">
-                  {metrics?.pdfsToday || 0} hoje
+                  {metrics?.pdfsToday || 0} PDFs hoje
                 </p>
                 <p className="text-xs text-zinc-400 mt-0.5">
-                  Mês: {metrics?.pdfsMonth || 0} • Prévias hoje: {metrics?.previewsToday || 0}
+                  Mês: {metrics?.pdfsMonth || 0} PDFs • Prévias hoje:{' '}
+                  <strong className="text-amber-300">
+                    {metrics?.uniquePreviewScoresToday || 0} únicas
+                  </strong>{' '}
+                  ({metrics?.previewsToday || 0} renders)
                 </p>
               </div>
             </div>
 
+            {/* Gráficos Visuais SVG */}
+            <AdminCharts dailySeries={dailySeries} txCounts={txCounts} />
+
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Últimas 20 Transações */}
+              {/* Transações com Filtro por Status */}
               <div className="rounded-2xl bg-studio-900 border border-zinc-800 overflow-hidden">
-                <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
+                <div className="px-4 py-3 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2">
                   <h2 className="text-xs font-extrabold uppercase tracking-wider text-sax-400">
-                    Últimas 20 Transações (payments)
+                    Transações ({filteredTransactions.length})
                   </h2>
+                  <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                    {(
+                      [
+                        { id: 'all', label: 'Todas' },
+                        { id: 'approved', label: 'Aprovadas' },
+                        { id: 'pending', label: 'Pendentes' },
+                        { id: 'expired', label: 'Expiradas' },
+                        { id: 'rejected', label: 'Recusadas' },
+                      ] as const
+                    ).map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setTxFilter(f.id)}
+                        className={`px-2 py-0.5 rounded-md font-bold border transition ${
+                          txFilter === f.id
+                            ? 'bg-sax-500 text-studio-950 border-sax-400'
+                            : 'bg-studio-950 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
                   <table className="w-full text-xs text-left">
-                    <thead className="bg-studio-950 text-zinc-400">
+                    <thead className="bg-studio-950 text-zinc-400 sticky top-0">
                       <tr>
                         <th className="px-3 py-2">Usuário</th>
                         <th className="px-3 py-2">Tipo</th>
                         <th className="px-3 py-2">Valor</th>
                         <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Data</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/70">
-                      {recentTransactions.length === 0 ? (
+                      {filteredTransactions.length === 0 ? (
                         <tr>
-                          <td colSpan={4} className="px-3 py-6 text-center text-zinc-500">
-                            Nenhuma transação registrada ainda.
+                          <td colSpan={5} className="px-3 py-6 text-center text-zinc-500">
+                            Nenhuma transação encontrada neste filtro.
                           </td>
                         </tr>
                       ) : (
-                        recentTransactions.map((t) => (
+                        filteredTransactions.map((t) => (
                           <tr key={t.id} className="hover:bg-zinc-900/50">
-                            <td className="px-3 py-2 truncate max-w-[160px]">{t.user_email}</td>
+                            <td className="px-3 py-2 truncate max-w-[150px]">{t.user_email}</td>
                             <td className="px-3 py-2 font-mono">{t.kind}</td>
                             <td className="px-3 py-2 font-bold text-emerald-400">
                               {formatBRL(Number(t.amount_brl || 0))}
                             </td>
-                            <td className="px-3 py-2">{t.status}</td>
+                            <td className="px-3 py-2">{renderStatusBadge(t.status)}</td>
+                            <td className="px-3 py-2 text-zinc-400 whitespace-nowrap">
+                              {new Date(t.paid_at || t.created_at).toLocaleString('pt-BR')}
+                            </td>
                           </tr>
                         ))
                       )}
@@ -418,16 +702,16 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
                 </div>
               </div>
 
-              {/* Últimos 20 Logs de Uso Reais */}
+              {/* Últimos Logs de Uso Reais */}
               <div className="rounded-2xl bg-studio-900 border border-zinc-800 overflow-hidden">
                 <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
                   <h2 className="text-xs font-extrabold uppercase tracking-wider text-sax-400">
-                    Últimos 20 Logs de Uso (Clientes Reais)
+                    Logs de Uso (Clientes Reais • {recentUsage.length})
                   </h2>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
                   <table className="w-full text-xs text-left">
-                    <thead className="bg-studio-950 text-zinc-400">
+                    <thead className="bg-studio-950 text-zinc-400 sticky top-0">
                       <tr>
                         <th className="px-3 py-2">Usuário</th>
                         <th className="px-3 py-2">Ação</th>
@@ -893,6 +1177,79 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
                         }))
                       }
                       className="w-full px-3 py-1.5 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              {/* Vídeo Tutorial YouTube (Tela Inicial + Botão Tutorial no Topo) */}
+              <div className="lg:col-span-2 p-5 rounded-2xl bg-studio-900 border border-zinc-800 space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-xs font-extrabold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
+                    <PlayCircle className="w-4 h-4 text-red-400" />
+                    <span>Vídeo Tutorial do YouTube (tutorial)</span>
+                  </h3>
+                  {settingsForm.tutorial.youtube_input.trim() && (
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold border ${
+                        extractedTutorialId
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                          : 'bg-red-500/15 border-red-500/40 text-red-300'
+                      }`}
+                    >
+                      {extractedTutorialId
+                        ? `ID YouTube válido: ${extractedTutorialId}`
+                        : 'Link ou código iframe inválido'}
+                    </span>
+                  )}
+                </div>
+
+                <label className="flex items-center gap-2 cursor-pointer font-bold">
+                  <input
+                    type="checkbox"
+                    checked={settingsForm.tutorial.enabled}
+                    onChange={(e) =>
+                      setSettingsForm((s) => ({
+                        ...s,
+                        tutorial: { ...s.tutorial, enabled: e.target.checked },
+                      }))
+                    }
+                    className="accent-[#D97706]"
+                  />
+                  <span>Ativar vídeo tutorial na Tela Inicial e no botão &ldquo;Tutorial&rdquo; do topo</span>
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">Título do Tutorial</span>
+                    <input
+                      type="text"
+                      value={settingsForm.tutorial.title}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          tutorial: { ...s.tutorial, title: e.target.value },
+                        }))
+                      }
+                      placeholder="Como usar o Rubsax Transposer"
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">
+                      Link do YouTube, ID ou Código &lt;iframe&gt;
+                    </span>
+                    <input
+                      type="text"
+                      value={settingsForm.tutorial.youtube_input}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          tutorial: { ...s.tutorial, youtube_input: e.target.value },
+                        }))
+                      }
+                      placeholder="https://www.youtube.com/watch?v=... ou código <iframe>"
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white font-mono"
                     />
                   </label>
                 </div>

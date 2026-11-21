@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 
 export type CanvasThemeMode = 'parchment' | 'white';
+export type ScoreLoadingReason = 'initial' | 'editing' | 'unlocking' | 'logout';
 
 interface ScoreViewerProps {
   modifiedMscx: string;
@@ -34,6 +35,7 @@ interface ScoreViewerProps {
   onRequestPreview: () => void;
   onLoadingChange?: (loading: boolean) => void;
   activeActionId?: string | null;
+  loadingReason?: ScoreLoadingReason;
   ctaButtonText?: string;
   onOpenPlansModal?: () => void;
   onPreviewStateChange?: (state: { isPreview: boolean; totalPages: number }) => void;
@@ -61,6 +63,7 @@ export default function ScoreViewer({
   onRequestPreview,
   onLoadingChange,
   activeActionId,
+  loadingReason = 'editing',
   ctaButtonText,
   onOpenPlansModal,
   onPreviewStateChange,
@@ -341,6 +344,31 @@ export default function ScoreViewer({
   const isSwitchingToPortrait = svgLoading && activeActionId === 'view-portrait';
   const isSwitchingToFullScore = svgLoading && activeActionId === 'view-full-score';
 
+  const loadingCopy =
+    loadingReason === 'unlocking'
+      ? {
+          title: 'Plano identificado! Liberando partitura completa...',
+          subtitle:
+            'Seu acesso foi confirmado. Carregando todas as páginas em alta definição...',
+        }
+      : loadingReason === 'logout'
+      ? {
+          title: 'Encerrando sessão...',
+          subtitle:
+            'Atualizando a visualização da partitura para o modo de visitante...',
+        }
+      : loadingReason === 'initial'
+      ? {
+          title: 'Carregando Partitura...',
+          subtitle:
+            'O motor do MuseScore 3 está preparando a visualização vetorial da sua partitura...',
+        }
+      : {
+          title: 'Aplicando Alterações...',
+          subtitle:
+            'O motor do MuseScore 3 está processando e renderizando a partitura vetorial. Aguarde alguns instantes...',
+        };
+
   return (
     <div
       ref={viewerRootRef}
@@ -350,7 +378,7 @@ export default function ScoreViewer({
           : 'flex flex-col h-full w-full relative'
       }
     >
-      {/* OVERLAY CENTRALIZADO NA ÁREA DA PARTITURA ("APLICANDO ALTERAÇÕES...") */}
+      {/* OVERLAY CENTRALIZADO NA ÁREA DA PARTITURA */}
       {svgLoading && (
         <div
           className={`${
@@ -363,11 +391,10 @@ export default function ScoreViewer({
             </div>
             <div className="space-y-1.5">
               <h3 className="text-lg sm:text-xl font-extrabold text-white tracking-tight">
-                Aplicando Alterações...
+                {loadingCopy.title}
               </h3>
               <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
-                O motor do MuseScore 3 está processando e renderizando a partitura vetorial.
-                Aguarde alguns instantes...
+                {loadingCopy.subtitle}
               </p>
             </div>
           </div>
@@ -450,12 +477,12 @@ export default function ScoreViewer({
 
             <button
               type="button"
-              disabled={svgLoading && viewMode === 'portrait'}
+              disabled={svgLoading}
               onClick={() => {
-                if (viewMode === 'portrait' && svgLoading) return;
+                if (svgLoading || viewMode === 'portrait') return;
                 onViewModeChange('portrait');
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
                 viewMode === 'portrait'
                   ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
                   : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
@@ -472,12 +499,12 @@ export default function ScoreViewer({
 
             <button
               type="button"
-              disabled={svgLoading && viewMode === 'full-score'}
+              disabled={svgLoading}
               onClick={() => {
-                if (viewMode === 'full-score' && svgLoading) return;
+                if (svgLoading || viewMode === 'full-score') return;
                 onViewModeChange('full-score');
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
                 viewMode === 'full-score'
                   ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
                   : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
@@ -495,8 +522,9 @@ export default function ScoreViewer({
             {hasUnrenderedChanges && (
               <button
                 type="button"
+                disabled={svgLoading}
                 onClick={onRequestPreview}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 disabled:cursor-not-allowed text-studio-950 font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
               >
                 {svgLoading ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />

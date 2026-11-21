@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { PaywallSettings, PricingSettings } from '@/lib/settings';
 import type { ClientAuthUser } from '@/lib/supabase/client';
@@ -71,6 +71,25 @@ export default function PlansModal({
     'idle' | 'pending' | 'approved' | 'rejected' | 'expired'
   >('idle');
 
+  const onPaymentApprovedRef = useRef(onPaymentApproved);
+  const onCloseRef = useRef(onClose);
+  const approvedHandledRef = useRef(false);
+
+  useEffect(() => {
+    onPaymentApprovedRef.current = onPaymentApproved;
+  }, [onPaymentApproved]);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  const finishApprovedFlow = useCallback(() => {
+    if (approvedHandledRef.current) return;
+    approvedHandledRef.current = true;
+    onPaymentApprovedRef.current?.();
+    onCloseRef.current();
+  }, []);
+
   useEffect(() => {
     if (!open) {
       setPixCharge(null);
@@ -78,14 +97,15 @@ export default function PlansModal({
       setLoadingKind(null);
       setCopiedPix(false);
       setPaymentStatus('idle');
+      approvedHandledRef.current = false;
       return;
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
+  }, [open]);
 
   const startCheckout = async (kind: PlanCheckoutKind) => {
     if (!user) {
@@ -187,12 +207,6 @@ export default function PlansModal({
 
         if (data.unlocked || data.status === 'approved') {
           setPaymentStatus('approved');
-          setTimeout(() => {
-            if (!cancelled) {
-              onPaymentApproved?.();
-              onClose();
-            }
-          }, 1100);
         } else if (data.status === 'rejected' || data.status === 'expired') {
           setPaymentStatus(data.status);
         }
@@ -209,7 +223,19 @@ export default function PlansModal({
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [open, pixCharge, paymentStatus, onPaymentApproved, onClose]);
+  }, [open, pixCharge, paymentStatus]);
+
+  // Efeito dedicado ao fechamento automático após aprovação (sem ser cancelado pelo reset do efeito de polling)
+  useEffect(() => {
+    if (!open || paymentStatus !== 'approved') {
+      approvedHandledRef.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      finishApprovedFlow();
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [open, paymentStatus, finishApprovedFlow]);
 
   if (!open) return null;
 
@@ -284,6 +310,13 @@ export default function PlansModal({
                   <p className="text-xs sm:text-sm text-emerald-200">
                     Desbloqueando sua partitura completa, Tela Cheia e exportação em PDF...
                   </p>
+                  <button
+                    type="button"
+                    onClick={finishApprovedFlow}
+                    className="mt-1 px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs sm:text-sm font-extrabold shadow-md transition"
+                  >
+                    Ver partitura liberada agora
+                  </button>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">

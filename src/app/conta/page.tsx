@@ -1,15 +1,15 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AccountPanelContent } from '@/components/AccountModal';
 import AuthModal from '@/components/AuthModal';
 import PlansModal, { PlanCheckoutKind } from '@/components/PlansModal';
+import SmartBackButton from '@/components/SmartBackButton';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from '@/lib/settings';
 import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import { ClientAuthUser, signOutUser } from '@/lib/supabase/client';
-import { ArrowLeft, CheckCircle2, Loader2, LogIn, User } from 'lucide-react';
+import { CheckCircle2, Loader2, LogIn, User } from 'lucide-react';
 
 export default function ContaPage() {
   const router = useRouter();
@@ -79,13 +79,31 @@ export default function ContaPage() {
     <div className="min-h-screen bg-studio-950 text-zinc-100 flex flex-col">
       <header className="bg-studio-900 border-b border-zinc-800 px-4 sm:px-6 py-3.5">
         <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-sax-400 hover:text-sax-300 transition"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Voltar ao Editor</span>
-          </Link>
+          <div className="flex items-center gap-3">
+            <SmartBackButton
+              currentPath="/conta"
+              label="Voltar"
+              fallbackHref="/?view=editor"
+            />
+            <span className="text-zinc-700">|</span>
+            <a
+              href="/?view=home"
+              title="Ir para a Tela Inicial"
+              className="inline-flex items-center gap-2 hover:opacity-90 transition"
+            >
+              <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-sax-400 to-sax-600 p-0.5 flex items-center justify-center overflow-hidden">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/icon.png"
+                  alt="Rubsax Logo"
+                  className="w-full h-full object-contain rounded"
+                />
+              </span>
+              <span className="text-xs font-extrabold tracking-tight text-white hidden sm:inline">
+                RUBSAX <span className="text-sax-400">TRANSPOSER</span>
+              </span>
+            </a>
+          </div>
           <span className="text-xs font-extrabold text-white">Área do Cliente</span>
         </div>
       </header>

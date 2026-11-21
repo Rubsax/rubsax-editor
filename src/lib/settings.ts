@@ -43,12 +43,19 @@ export interface SupportLinksSettings {
   catalog_url: string;
 }
 
+export interface TutorialSettings {
+  enabled: boolean;
+  title: string;
+  youtube_input: string;
+}
+
 export interface AppSettings {
   pricing: PricingSettings;
   paywall: PaywallSettings;
   announcement: AnnouncementSettings;
   operations: OperationsSettings;
   support_links: SupportLinksSettings;
+  tutorial: TutorialSettings;
 }
 
 export type AppSettingKey = keyof AppSettings;
@@ -59,6 +66,7 @@ export const SETTING_DESCRIPTIONS: Record<AppSettingKey, string> = {
   announcement: 'Banner global exibido no topo da aplicação para comunicados ou promoções.',
   operations: 'Modo manutenção, limite de concorrência do MuseScore 3, uso justo e limpeza de /tmp.',
   support_links: 'Links oficiais de suporte, WhatsApp, loja e catálogo.',
+  tutorial: 'Vídeo tutorial oficial do YouTube exibido na tela inicial e no botão Tutorial.',
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -97,6 +105,11 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     store_url: 'https://www.rubsax.com.br/',
     catalog_url: 'https://catalogo.rubsax.com.br/',
   },
+  tutorial: {
+    enabled: false,
+    title: 'Como usar o Rubsax Transposer',
+    youtube_input: '',
+  },
 };
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -116,6 +129,7 @@ function mergeSettingsWithDefaults(rows: Array<{ key: string; value: unknown }>)
     announcement: { ...DEFAULT_APP_SETTINGS.announcement },
     operations: { ...DEFAULT_APP_SETTINGS.operations },
     support_links: { ...DEFAULT_APP_SETTINGS.support_links },
+    tutorial: { ...DEFAULT_APP_SETTINGS.tutorial },
   };
 
   for (const row of rows) {
@@ -206,6 +220,19 @@ function mergeSettingsWithDefaults(rows: Array<{ key: string; value: unknown }>)
             ? val.catalog_url.trim()
             : merged.support_links.catalog_url,
       };
+    } else if (row.key === 'tutorial') {
+      merged.tutorial = {
+        enabled:
+          typeof val.enabled === 'boolean' ? val.enabled : merged.tutorial.enabled,
+        title:
+          typeof val.title === 'string' && val.title.trim()
+            ? val.title.trim()
+            : merged.tutorial.title,
+        youtube_input:
+          typeof val.youtube_input === 'string'
+            ? val.youtube_input.trim()
+            : merged.tutorial.youtube_input,
+      };
     }
   }
 
@@ -277,6 +304,10 @@ export async function saveAppSettings(
       key: 'support_links',
       value: { ...current.support_links, ...(nextPartial.support_links || {}) },
     },
+    {
+      key: 'tutorial',
+      value: { ...current.tutorial, ...(nextPartial.tutorial || {}) },
+    },
   ]);
 
   const nowIso = new Date().toISOString();
@@ -286,6 +317,7 @@ export async function saveAppSettings(
     'announcement',
     'operations',
     'support_links',
+    'tutorial',
   ];
 
   const payload = keysToPersist.map((key) => ({

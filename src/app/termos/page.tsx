@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
-import { ArrowLeft, FileText } from 'lucide-react';
+import SmartBackButton from '@/components/SmartBackButton';
+import { FileText } from 'lucide-react';
 
 export const metadata: Metadata = {
   title: 'Termos de Uso | Rubsax Transposer',
@@ -16,13 +16,11 @@ export default function TermosPage() {
     <div className="min-h-screen bg-studio-950 text-zinc-200 flex flex-col">
       <header className="bg-studio-900 border-b border-zinc-800 px-4 sm:px-6 py-3.5">
         <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 text-xs sm:text-sm font-bold text-sax-400 hover:text-sax-300 transition"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Voltar ao Rubsax Transposer</span>
-          </Link>
+          <SmartBackButton
+            currentPath="/termos"
+            label="Voltar"
+            fallbackHref="/?view=editor"
+          />
           <span className="text-[11px] font-semibold text-zinc-400">
             Rubsax Partituras • Termos
           </span>

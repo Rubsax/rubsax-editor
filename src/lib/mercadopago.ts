@@ -353,6 +353,7 @@ export async function getAuthorizedPaymentById(authPaymentId: string): Promise<{
   id: string;
   preapproval_id?: string;
   status?: string;
+  paymentStatus?: string;
   transaction_amount?: number;
 }> {
   const token = getMpAccessToken();
@@ -372,6 +373,10 @@ export async function getAuthorizedPaymentById(authPaymentId: string): Promise<{
     id?: string;
     preapproval_id?: string;
     status?: string;
+    payment?: {
+      status?: string;
+      status_detail?: string;
+    };
     transaction_amount?: number;
     message?: string;
   };
@@ -387,6 +392,7 @@ export async function getAuthorizedPaymentById(authPaymentId: string): Promise<{
     id: String(data.id),
     preapproval_id: data.preapproval_id ? String(data.preapproval_id) : undefined,
     status: data.status,
+    paymentStatus: data.payment?.status || data.status,
     transaction_amount: data.transaction_amount,
   };
 }
@@ -769,9 +775,17 @@ export async function extendOrActivateMonthlySubscription(params: {
   });
 }
 
+const PAID_AUTHORIZED_PAYMENT_STATUSES = new Set([
+  'processed',
+  'approved',
+  'accredited',
+  'paid',
+]);
+
 export async function reconcileMpPreapproval(
   preapproval: MpPreapprovalResponse,
-  authorizedPaymentId?: string
+  authorizedPaymentId?: string,
+  authorizedPaymentStatus?: string
 ): Promise<{ status: string; unlocked: boolean }> {
   if (!isSupabaseConfigured()) {
     return { status: preapproval.status || 'pending', unlocked: false };
@@ -786,27 +800,41 @@ export async function reconcileMpPreapproval(
     `/rest/v1/subscriptions?mp_preapproval_id=eq.${encodeURIComponent(preapprovalId)}&limit=1`
   );
   const subRows = subLookup.ok ? ((await subLookup.json()) as SubscriptionRow[]) : [];
-  const targetUserId = subRows[0]?.user_id || extUserId;
+  const currentSub = subRows[0] || null;
+  const targetUserId = currentSub?.user_id || extUserId;
   const nowIso = new Date().toISOString();
 
   if (mpStatus === 'authorized') {
+    // 1. Validar se o pagamento recorrente foi efetivamente pago antes de creditar/estender
+    if (authorizedPaymentId && authorizedPaymentStatus !== undefined) {
+      const apStatus = authorizedPaymentStatus.trim().toLowerCase();
+      if (!PAID_AUTHORIZED_PAYMENT_STATUSES.has(apStatus)) {
+        console.log(
+          `[MP Reconcile] AuthorizedPayment ${authorizedPaymentId} (preapproval ${preapprovalId}) ignorado com status=${apStatus}`
+        );
+        return { status: apStatus || 'pending', unlocked: false };
+      }
+    }
+
     const paymentKey = authorizedPaymentId
       ? `authpay_${authorizedPaymentId}`
       : preapprovalId;
 
-    // Trava idempotente por pagamento/ciclo em payments
-    const existingPayRes = await supabaseAdminFetch(
+    const existingKeyRes = await supabaseAdminFetch(
       `/rest/v1/payments?mp_payment_id=eq.${encodeURIComponent(paymentKey)}&limit=1`
     );
-    const existingPays = existingPayRes.ok
-      ? ((await existingPayRes.json()) as PaymentRow[])
+    const existingByKey = existingKeyRes.ok
+      ? ((await existingKeyRes.json()) as PaymentRow[])
       : [];
 
-    let shouldExtend = false;
-    if (existingPays.length > 0) {
-      if (existingPays[0].status !== 'approved') {
+    if (authorizedPaymentId) {
+      const keyRow = existingByKey[0];
+      if (keyRow) {
+        if (keyRow.status === 'approved') {
+          return { status: 'approved', unlocked: true };
+        }
         const claim = await supabaseAdminFetch(
-          `/rest/v1/payments?id=eq.${encodeURIComponent(existingPays[0].id)}&status=neq.approved`,
+          `/rest/v1/payments?id=eq.${encodeURIComponent(keyRow.id)}&status=neq.approved`,
           {
             method: 'PATCH',
             headers: { Prefer: 'return=representation' },
@@ -814,9 +842,173 @@ export async function reconcileMpPreapproval(
           }
         );
         const claimed = claim.ok ? ((await claim.json()) as PaymentRow[]) : [];
-        shouldExtend = claimed.length > 0;
+        if (claimed.length > 0 && targetUserId) {
+          await extendOrActivateMonthlySubscription({
+            userId: targetUserId,
+            planType: 'monthly_card',
+            mpPreapprovalId: preapprovalId,
+            mpLastPaymentId: paymentKey,
+          });
+        }
+        return { status: 'approved', unlocked: true };
       }
-    } else if (targetUserId) {
+
+      if (currentSub?.mp_last_payment_id === paymentKey) {
+        return { status: 'approved', unlocked: true };
+      }
+
+      // Deduplicação da 1ª cobrança: evita somar 2 pagamentos/60 dias quando subscription_preapproval aprovou primeiro
+      const initialPayRes = await supabaseAdminFetch(
+        `/rest/v1/payments?mp_payment_id=eq.${encodeURIComponent(preapprovalId)}&limit=1`
+      );
+      const initialPays = initialPayRes.ok
+        ? ((await initialPayRes.json()) as PaymentRow[])
+        : [];
+      const initialPreapprovalPay = initialPays[0] || null;
+
+      if (initialPreapprovalPay) {
+        if (initialPreapprovalPay.status !== 'approved') {
+          const claim = await supabaseAdminFetch(
+            `/rest/v1/payments?id=eq.${encodeURIComponent(
+              initialPreapprovalPay.id
+            )}&status=neq.approved`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=representation' },
+              body: JSON.stringify({
+                status: 'approved',
+                paid_at: nowIso,
+                mp_payment_id: paymentKey,
+              }),
+            }
+          );
+          const claimed = claim.ok ? ((await claim.json()) as PaymentRow[]) : [];
+          if (claimed.length > 0 && targetUserId) {
+            await extendOrActivateMonthlySubscription({
+              userId: targetUserId,
+              planType: 'monthly_card',
+              mpPreapprovalId: preapprovalId,
+              mpLastPaymentId: paymentKey,
+            });
+            console.log(
+              `[MP Reconcile] 1ª cobrança AuthorizedPayment ${authorizedPaymentId} ativou assinatura ${preapprovalId} para ${targetUserId}`
+            );
+          }
+          return { status: 'approved', unlocked: true };
+        }
+
+        const paidTs = new Date(
+          initialPreapprovalPay.paid_at || initialPreapprovalPay.created_at
+        ).getTime();
+        const twentyDaysMs = 20 * 24 * 60 * 60 * 1000;
+        if (Date.now() - paidTs < twentyDaysMs) {
+          // Mesmo pagamento inicial já aprovado via subscription_preapproval: apenas promove a chave sem duplicar receita nem dias
+          await supabaseAdminFetch(
+            `/rest/v1/payments?id=eq.${encodeURIComponent(
+              initialPreapprovalPay.id
+            )}&mp_payment_id=eq.${encodeURIComponent(preapprovalId)}`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=minimal' },
+              body: JSON.stringify({ mp_payment_id: paymentKey }),
+            }
+          );
+          if (currentSub?.id) {
+            await supabaseAdminFetch(
+              `/rest/v1/subscriptions?id=eq.${encodeURIComponent(currentSub.id)}`,
+              {
+                method: 'PATCH',
+                headers: { Prefer: 'return=minimal' },
+                body: JSON.stringify({
+                  mp_last_payment_id: paymentKey,
+                  updated_at: nowIso,
+                }),
+              }
+            );
+          }
+          console.log(
+            `[MP Reconcile] AuthorizedPayment ${authorizedPaymentId} vinculado à 1ª cobrança já computada (${preapprovalId}) sem duplicação.`
+          );
+          return { status: 'approved', unlocked: true };
+        }
+      }
+
+      // Renovação mensal real (ou cobrança sem registro prévio): inserir e estender +30 dias
+      if (targetUserId) {
+        const settings = await getAppSettings();
+        const amountBrl =
+          Number(preapproval.auto_recurring?.transaction_amount) ||
+          settings.pricing.monthly_price_brl;
+
+        const insRes = await supabaseAdminFetch('/rest/v1/payments', {
+          method: 'POST',
+          headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify({
+            user_id: targetUserId,
+            mp_payment_id: paymentKey,
+            kind: 'monthly_card',
+            amount_brl: amountBrl,
+            status: 'approved',
+            paid_at: nowIso,
+          }),
+        });
+        if (insRes.ok) {
+          await extendOrActivateMonthlySubscription({
+            userId: targetUserId,
+            planType: 'monthly_card',
+            mpPreapprovalId: preapprovalId,
+            mpLastPaymentId: paymentKey,
+          });
+          console.log(
+            `[MP Reconcile] Cobrança recorrente ${authorizedPaymentId} estendeu assinatura ${preapprovalId} para ${targetUserId}`
+          );
+        }
+      }
+      return { status: 'approved', unlocked: true };
+    }
+
+    // Sem authorizedPaymentId (evento subscription_preapproval ou retorno em /conta)
+    const prePayRow = existingByKey[0] || null;
+    const isCurrentSubAlreadyActive = Boolean(
+      currentSub &&
+        currentSub.status === 'active' &&
+        currentSub.current_period_end &&
+        new Date(currentSub.current_period_end).getTime() > Date.now()
+    );
+
+    if (prePayRow) {
+      if (prePayRow.status === 'approved') {
+        return { status: 'approved', unlocked: true };
+      }
+      const claim = await supabaseAdminFetch(
+        `/rest/v1/payments?id=eq.${encodeURIComponent(prePayRow.id)}&status=neq.approved`,
+        {
+          method: 'PATCH',
+          headers: { Prefer: 'return=representation' },
+          body: JSON.stringify({ status: 'approved', paid_at: nowIso }),
+        }
+      );
+      const claimed = claim.ok ? ((await claim.json()) as PaymentRow[]) : [];
+      if (claimed.length > 0 && targetUserId) {
+        await extendOrActivateMonthlySubscription({
+          userId: targetUserId,
+          planType: 'monthly_card',
+          mpPreapprovalId: preapprovalId,
+          mpLastPaymentId: preapprovalId,
+        });
+        console.log(
+          `[MP Reconcile] Assinatura Preapproval ${preapprovalId} ativada/estendida para ${targetUserId}`
+        );
+      }
+      return { status: 'approved', unlocked: true };
+    }
+
+    // Se a 1ª cobrança já foi promovida para authpay_* e a assinatura já está ativa no futuro, não duplicar
+    if (isCurrentSubAlreadyActive) {
+      return { status: 'approved', unlocked: true };
+    }
+
+    if (targetUserId) {
       const settings = await getAppSettings();
       const amountBrl =
         Number(preapproval.auto_recurring?.transaction_amount) ||
@@ -827,39 +1019,37 @@ export async function reconcileMpPreapproval(
         headers: { Prefer: 'return=minimal' },
         body: JSON.stringify({
           user_id: targetUserId,
-          mp_payment_id: paymentKey,
+          mp_payment_id: preapprovalId,
           kind: 'monthly_card',
           amount_brl: amountBrl,
           status: 'approved',
           paid_at: nowIso,
         }),
       });
-      shouldExtend = insRes.ok;
-    }
-
-    if (shouldExtend && targetUserId) {
-      await extendOrActivateMonthlySubscription({
-        userId: targetUserId,
-        planType: 'monthly_card',
-        mpPreapprovalId: preapprovalId,
-        mpLastPaymentId: paymentKey,
-      });
-      console.log(
-        `[MP Reconcile] Assinatura Preapproval ${preapprovalId} ativada/estendida para ${targetUserId}`
-      );
+      if (insRes.ok) {
+        await extendOrActivateMonthlySubscription({
+          userId: targetUserId,
+          planType: 'monthly_card',
+          mpPreapprovalId: preapprovalId,
+          mpLastPaymentId: preapprovalId,
+        });
+        console.log(
+          `[MP Reconcile] Assinatura Preapproval ${preapprovalId} ativada para ${targetUserId}`
+        );
+      }
     }
 
     return { status: 'approved', unlocked: true };
   }
 
   if (mpStatus === 'cancelled' || mpStatus === 'paused') {
-    if (subRows[0]) {
+    if (currentSub) {
       const hasRemainingDays =
-        subRows[0].current_period_end &&
-        new Date(subRows[0].current_period_end).getTime() > Date.now();
+        currentSub.current_period_end &&
+        new Date(currentSub.current_period_end).getTime() > Date.now();
 
       await supabaseAdminFetch(
-        `/rest/v1/subscriptions?id=eq.${encodeURIComponent(subRows[0].id)}`,
+        `/rest/v1/subscriptions?id=eq.${encodeURIComponent(currentSub.id)}`,
         {
           method: 'PATCH',
           headers: { Prefer: 'return=minimal' },

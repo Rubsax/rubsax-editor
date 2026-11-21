@@ -1586,12 +1586,19 @@ export function transformScoreXml(
       }
     });
 
-    // 6d. Processar Letras (<Lyrics>)
+    // 6d. Processar Letras (<Lyrics>) e Textos de Pauta (<StaffText>), preservando <SystemText> e cabeçalho <VBox>
     if (!options.showLyrics && isThisStaffActive) {
       const lyricNodes = Array.from(staffBody.getElementsByTagName('Lyrics'));
       for (const lNode of lyricNodes) {
         if (lNode.parentNode) {
           lNode.parentNode.removeChild(lNode);
+        }
+      }
+
+      const staffTextNodes = Array.from(staffBody.getElementsByTagName('StaffText'));
+      for (const stNode of staffTextNodes) {
+        if (stNode.parentNode) {
+          stNode.parentNode.removeChild(stNode);
         }
       }
     }

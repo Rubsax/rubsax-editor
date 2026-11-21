@@ -48,7 +48,7 @@ export interface PaymentRow {
   mp_payment_id: string | null;
   kind: 'single_24h' | 'monthly_pix' | 'monthly_card';
   amount_brl: number;
-  status: 'pending' | 'approved' | 'refunded' | 'rejected';
+  status: 'pending' | 'approved' | 'refunded' | 'rejected' | 'expired';
   paid_at: string | null;
   created_at: string;
 }

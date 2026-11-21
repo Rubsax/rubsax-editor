@@ -44,6 +44,7 @@ export async function GET(req: NextRequest) {
           monthly_pdf_fair_use_limit: settings.operations.monthly_pdf_fair_use_limit,
         },
         support_links: settings.support_links,
+        tutorial: settings.tutorial,
       },
     });
   } catch {

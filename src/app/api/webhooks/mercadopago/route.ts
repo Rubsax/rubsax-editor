@@ -75,11 +75,16 @@ export async function POST(req: NextRequest) {
     // 3. Eventos de cobrança recorrente autorizada (renovações mensais do cartão)
     if (eventType === 'subscription_authorized_payment') {
       const authPayment = await getAuthorizedPaymentById(dataId);
+      const authPayStatus = authPayment.paymentStatus || authPayment.status;
       if (authPayment.preapproval_id) {
         const preapproval = await getPreapprovalById(authPayment.preapproval_id);
-        const res = await reconcileMpPreapproval(preapproval, authPayment.id);
+        const res = await reconcileMpPreapproval(
+          preapproval,
+          authPayment.id,
+          authPayStatus
+        );
         console.log(
-          `[MP Webhook] AuthorizedPayment ${dataId} (preapproval ${authPayment.preapproval_id}) -> status=${res.status}`
+          `[MP Webhook] AuthorizedPayment ${dataId} (preapproval=${authPayment.preapproval_id}, mp_pay_status=${authPayStatus || '-'}) -> status=${res.status}, unlocked=${res.unlocked}`
         );
       }
       return NextResponse.json({ received: true }, { status: 200 });
