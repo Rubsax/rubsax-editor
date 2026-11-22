@@ -10,6 +10,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 1,
     },
     {
+      url: 'https://app.rubsax.com.br/ajuda',
+      lastModified: now,
+      changeFrequency: 'weekly',
+      priority: 0.8,
+    },
+    {
       url: 'https://app.rubsax.com.br/privacidade',
       lastModified: now,
       changeFrequency: 'monthly',

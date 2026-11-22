@@ -218,7 +218,16 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
     const res = await fetch('/api/admin/settings', { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      if (data.settings) setSettingsForm(data.settings);
+      if (data.settings) {
+        setSettingsForm({
+          ...DEFAULT_APP_SETTINGS,
+          ...data.settings,
+          free_pass: {
+            ...DEFAULT_APP_SETTINGS.free_pass,
+            ...(data.settings.free_pass || {}),
+          },
+        });
+      }
     }
   }, []);
 
@@ -1182,6 +1191,130 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
                 </div>
               </div>
 
+              {/* Modo Gratuito (Passe por Conta) */}
+              <div className="lg:col-span-2 p-5 rounded-2xl bg-studio-900 border border-emerald-500/35 space-y-4 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-xs font-extrabold uppercase tracking-wider text-emerald-400">
+                    Modo Gratuito (Passe — free_pass)
+                  </h3>
+                  <label className="flex items-center gap-2 cursor-pointer font-bold text-emerald-200">
+                    <input
+                      type="checkbox"
+                      checked={settingsForm.free_pass.enabled}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: { ...s.free_pass, enabled: e.target.checked },
+                        }))
+                      }
+                      className="accent-[#D97706]"
+                    />
+                    <span>Habilitar Modo Gratuito (Passe)</span>
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">Cooldown (dias)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={365}
+                      value={settingsForm.free_pass.cooldown_days}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: {
+                            ...s.free_pass,
+                            cooldown_days: parseInt(e.target.value, 10) || 7,
+                          },
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">Janela da Música (horas)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={168}
+                      value={settingsForm.free_pass.unlock_hours}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: {
+                            ...s.free_pass,
+                            unlock_hours: parseInt(e.target.value, 10) || 24,
+                          },
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">Máx. Contas / IP</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={settingsForm.free_pass.max_ip_uses_per_cooldown}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: {
+                            ...s.free_pass,
+                            max_ip_uses_per_cooldown: parseInt(e.target.value, 10) || 3,
+                          },
+                        }))
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                  <label className="flex items-center gap-2 cursor-pointer font-bold py-2">
+                    <input
+                      type="checkbox"
+                      checked={settingsForm.free_pass.pdf_watermark_enabled}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: {
+                            ...s.free_pass,
+                            pdf_watermark_enabled: e.target.checked,
+                          },
+                        }))
+                      }
+                      className="accent-[#D97706]"
+                    />
+                    <span>Ativar marca d&apos;água / rodapé discreto no PDF gratuito</span>
+                  </label>
+
+                  <label className="space-y-1">
+                    <span className="text-zinc-300 font-semibold">Texto do Rodapé no PDF</span>
+                    <input
+                      type="text"
+                      value={settingsForm.free_pass.pdf_watermark_text}
+                      onChange={(e) =>
+                        setSettingsForm((s) => ({
+                          ...s,
+                          free_pass: {
+                            ...s.free_pass,
+                            pdf_watermark_text: e.target.value,
+                          },
+                        }))
+                      }
+                      placeholder="Transposto gratuitamente em app.rubsax.com.br"
+                      className="w-full px-3 py-2 rounded-xl bg-studio-950 border border-zinc-700 text-white"
+                    />
+                  </label>
+                </div>
+              </div>
+
               {/* Vídeo Tutorial YouTube (Tela Inicial + Botão Tutorial no Topo) */}
               <div className="lg:col-span-2 p-5 rounded-2xl bg-studio-900 border border-zinc-800 space-y-3 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1260,7 +1393,7 @@ export default function AdminDashboard({ adminEmail }: { adminEmail: string }) {
               <button
                 type="submit"
                 disabled={savingSettings}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-sm font-extrabold shadow-lg transition disabled:opacity-50"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-sm font-extrabold shadow-lg active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
               >
                 {savingSettings ? (
                   <Loader2 className="w-4 h-4 animate-spin" />

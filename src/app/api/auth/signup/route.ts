@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isDisposableEmail } from '@/lib/anti-abuse';
 import {
   buildSupabaseHeaders,
   ensureUserProfile,
@@ -24,6 +25,17 @@ export async function POST(req: NextRequest) {
     if (!email || !password || password.length < 6) {
       return NextResponse.json(
         { error: 'Informe um e-mail válido e senha com no mínimo 6 caracteres.' },
+        { status: 400 }
+      );
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (isDisposableEmail(cleanEmail)) {
+      return NextResponse.json(
+        {
+          error:
+            'E-mails temporários ou descartáveis não são permitidos. Utilize um e-mail pessoal válido (Gmail, Outlook, iCloud, etc.).',
+        },
         { status: 400 }
       );
     }

@@ -1,6 +1,7 @@
-import { getAppSettings } from './settings';
+import { AppSettings, getAppSettings } from './settings';
 import {
   AuthUser,
+  FreeUnlockRow,
   SingleUnlockRow,
   SubscriptionPlanType,
   SubscriptionRow,
@@ -9,7 +10,12 @@ import {
 } from './supabase/admin';
 import { isAdminEmail } from './supabase/server';
 
-export type AccessLevel = 'dev' | 'subscription' | 'single' | 'preview';
+export type AccessLevel =
+  | 'dev'
+  | 'subscription'
+  | 'single'
+  | 'free_pass'
+  | 'preview';
 
 export interface AccessCheckResult {
   level: AccessLevel;
@@ -18,6 +24,38 @@ export interface AccessCheckResult {
   planType?: SubscriptionPlanType;
   subscriptionEndsAt?: string | null;
   singleUnlockExpiresAt?: string | null;
+  freeUnlockExpiresAt?: string | null;
+}
+
+export interface FreePassStatus {
+  enabled: boolean;
+  cooldownDays: number;
+  unlockHours: number;
+  state:
+    | 'disabled'
+    | 'unauthenticated'
+    | 'email_unconfirmed'
+    | 'pro'
+    | 'active_for_file'
+    | 'cooldown'
+    | 'available';
+  activeUnlock: {
+    id: string;
+    fileHash: string;
+    fileName: string | null;
+    unlockedAt: string;
+    expiresAt: string;
+    cooldownUntil: string;
+  } | null;
+  cooldownUntil: string | null;
+}
+
+export interface UserAccessSnapshot {
+  access: AccessCheckResult;
+  settings: AppSettings;
+  activeSubscription: SubscriptionRow | null;
+  activeSingleUnlocks: SingleUnlockRow[];
+  freePassStatus: FreePassStatus;
 }
 
 export async function getUserActiveSubscription(
@@ -64,64 +102,183 @@ export async function getUserActiveSingleUnlocks(
   }
 }
 
-export async function checkUserAccess(
+export async function getUserFreeUnlocks(
+  userId: string
+): Promise<FreeUnlockRow[]> {
+  if (!isSupabaseConfigured() || !userId) return [];
+  try {
+    const nowIso = new Date().toISOString();
+    const res = await supabaseAdminFetch(
+      `/rest/v1/free_unlocks?user_id=eq.${encodeURIComponent(
+        userId
+      )}&or=(expires_at.gt.${encodeURIComponent(
+        nowIso
+      )},cooldown_until.gt.${encodeURIComponent(
+        nowIso
+      )})&order=unlocked_at.desc`,
+      { method: 'GET' }
+    );
+    if (!res.ok) return [];
+    const rows = (await res.json()) as FreeUnlockRow[];
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapFreeUnlockSummary(row: FreeUnlockRow) {
+  return {
+    id: row.id,
+    fileHash: row.file_hash,
+    fileName: row.file_name,
+    unlockedAt: row.unlocked_at,
+    expiresAt: row.expires_at,
+    cooldownUntil: row.cooldown_until,
+  };
+}
+
+/**
+ * Resolve acesso completo, assinatura, avulsos e status do Passe Gratuito em paralelo
+ * (evita consultas duplicadas ao Supabase).
+ */
+export async function resolveUserAccessSnapshot(
   user: AuthUser | null,
   fileHash?: string | null
-): Promise<AccessCheckResult> {
-  // 1. Modo Dev (exclusivo do proprietário via ADMIN_EMAIL)
-  if (user && isAdminEmail(user.email)) {
-    return {
+): Promise<UserAccessSnapshot> {
+  const isUserDev = Boolean(user && isAdminEmail(user.email));
+  const shouldFetchUserData = Boolean(user?.id && isSupabaseConfigured());
+
+  const [settings, activeSubscription, activeSingleUnlocks, freeUnlocks] =
+    await Promise.all([
+      getAppSettings(),
+      shouldFetchUserData
+        ? getUserActiveSubscription(user!.id)
+        : Promise.resolve(null),
+      shouldFetchUserData
+        ? getUserActiveSingleUnlocks(user!.id)
+        : Promise.resolve([] as SingleUnlockRow[]),
+      shouldFetchUserData
+        ? getUserFreeUnlocks(user!.id)
+        : Promise.resolve([] as FreeUnlockRow[]),
+    ]);
+
+  const nowMs = Date.now();
+  const matchingSingleUnlock = fileHash
+    ? activeSingleUnlocks.find((u) => u.file_hash === fileHash)
+    : undefined;
+
+  const matchingActiveFreeUnlock = fileHash
+    ? freeUnlocks.find(
+        (u) =>
+          u.file_hash === fileHash &&
+          Boolean(u.expires_at) &&
+          new Date(u.expires_at).getTime() > nowMs
+      )
+    : undefined;
+
+  const anyActiveFreeUnlock =
+    freeUnlocks.find(
+      (u) => Boolean(u.expires_at) && new Date(u.expires_at).getTime() > nowMs
+    ) || null;
+
+  const activeCooldownRow =
+    freeUnlocks.find(
+      (u) =>
+        Boolean(u.cooldown_until) &&
+        new Date(u.cooldown_until).getTime() > nowMs
+    ) || null;
+
+  let access: AccessCheckResult;
+  if (isUserDev) {
+    access = {
       level: 'dev',
       isDev: true,
       reason: 'Modo Dev (Proprietário)',
     };
-  }
-
-  // 2. Paywall desativado globalmente em app_settings (ex: modo promocional gratuito)
-  const settings = await getAppSettings();
-  if (settings.paywall.paywall_enabled === false) {
-    return {
+  } else if (settings.paywall.paywall_enabled === false) {
+    access = {
       level: 'subscription',
       isDev: false,
       reason: 'Acesso completo liberado (Paywall desativado nas configurações)',
     };
+  } else if (activeSubscription) {
+    access = {
+      level: 'subscription',
+      isDev: false,
+      reason:
+        activeSubscription.plan_type === 'manual_vip'
+          ? 'Acesso VIP Ativo'
+          : 'Assinatura Mensal Ativa',
+      planType: activeSubscription.plan_type,
+      subscriptionEndsAt: activeSubscription.current_period_end,
+    };
+  } else if (matchingSingleUnlock) {
+    access = {
+      level: 'single',
+      isDev: false,
+      reason: 'Desbloqueio Avulso Ativo',
+      singleUnlockExpiresAt: matchingSingleUnlock.expires_at,
+    };
+  } else if (matchingActiveFreeUnlock) {
+    access = {
+      level: 'free_pass',
+      isDev: false,
+      reason: 'Passe Gratuito Ativo (24h)',
+      freeUnlockExpiresAt: matchingActiveFreeUnlock.expires_at,
+    };
+  } else {
+    access = {
+      level: 'preview',
+      isDev: false,
+      reason: 'Modo Prévia',
+    };
   }
 
-  if (user?.id && isSupabaseConfigured()) {
-    // 3. Assinatura Mensal ou Cortesia VIP ativa
-    const activeSub = await getUserActiveSubscription(user.id);
-    if (activeSub) {
-      return {
-        level: 'subscription',
-        isDev: false,
-        reason:
-          activeSub.plan_type === 'manual_vip'
-            ? 'Acesso VIP Ativo'
-            : 'Assinatura Mensal Ativa',
-        planType: activeSub.plan_type,
-        subscriptionEndsAt: activeSub.current_period_end,
-      };
-    }
-
-    // 4. Desbloqueio Avulso 24h válido para este SHA-256 específico
-    if (fileHash) {
-      const unlocks = await getUserActiveSingleUnlocks(user.id);
-      const matchingUnlock = unlocks.find((u) => u.file_hash === fileHash);
-      if (matchingUnlock) {
-        return {
-          level: 'single',
-          isDev: false,
-          reason: 'Desbloqueio Avulso Ativo',
-          singleUnlockExpiresAt: matchingUnlock.expires_at,
-        };
-      }
-    }
+  let freePassState: FreePassStatus['state'];
+  if (
+    access.level === 'dev' ||
+    access.level === 'subscription' ||
+    access.level === 'single'
+  ) {
+    freePassState = 'pro';
+  } else if (matchingActiveFreeUnlock) {
+    freePassState = 'active_for_file';
+  } else if (!settings.free_pass.enabled) {
+    freePassState = 'disabled';
+  } else if (!user) {
+    freePassState = 'unauthenticated';
+  } else if (!user.email_confirmed_at) {
+    freePassState = 'email_unconfirmed';
+  } else if (activeCooldownRow) {
+    freePassState = 'cooldown';
+  } else {
+    freePassState = 'available';
   }
 
-  // 5. Padrão: Modo Prévia censurado no backend
+  const displayedActiveUnlock = matchingActiveFreeUnlock || anyActiveFreeUnlock;
+
   return {
-    level: 'preview',
-    isDev: false,
-    reason: 'Modo Prévia',
+    access,
+    settings,
+    activeSubscription,
+    activeSingleUnlocks,
+    freePassStatus: {
+      enabled: settings.free_pass.enabled,
+      cooldownDays: settings.free_pass.cooldown_days,
+      unlockHours: settings.free_pass.unlock_hours,
+      state: freePassState,
+      activeUnlock: displayedActiveUnlock
+        ? mapFreeUnlockSummary(displayedActiveUnlock)
+        : null,
+      cooldownUntil: activeCooldownRow ? activeCooldownRow.cooldown_until : null,
+    },
   };
+}
+
+export async function checkUserAccess(
+  user: AuthUser | null,
+  fileHash?: string | null
+): Promise<AccessCheckResult> {
+  const snapshot = await resolveUserAccessSnapshot(user, fileHash);
+  return snapshot.access;
 }

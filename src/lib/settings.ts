@@ -49,6 +49,15 @@ export interface TutorialSettings {
   youtube_input: string;
 }
 
+export interface FreePassSettings {
+  enabled: boolean;
+  cooldown_days: number;
+  unlock_hours: number;
+  max_ip_uses_per_cooldown: number;
+  pdf_watermark_enabled: boolean;
+  pdf_watermark_text: string;
+}
+
 export interface AppSettings {
   pricing: PricingSettings;
   paywall: PaywallSettings;
@@ -56,6 +65,7 @@ export interface AppSettings {
   operations: OperationsSettings;
   support_links: SupportLinksSettings;
   tutorial: TutorialSettings;
+  free_pass: FreePassSettings;
 }
 
 export type AppSettingKey = keyof AppSettings;
@@ -67,6 +77,7 @@ export const SETTING_DESCRIPTIONS: Record<AppSettingKey, string> = {
   operations: 'Modo manutenção, limite de concorrência do MuseScore 3, uso justo e limpeza de /tmp.',
   support_links: 'Links oficiais de suporte, WhatsApp, loja e catálogo.',
   tutorial: 'Vídeo tutorial oficial do YouTube exibido na tela inicial e no botão Tutorial.',
+  free_pass: 'Configurações do Modo Gratuito (Passe por conta), cooldown, anti-abuso e rodapé no PDF.',
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -110,6 +121,14 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
     title: 'Como usar o Rubsax Transposer',
     youtube_input: '',
   },
+  free_pass: {
+    enabled: true,
+    cooldown_days: 7,
+    unlock_hours: 24,
+    max_ip_uses_per_cooldown: 3,
+    pdf_watermark_enabled: true,
+    pdf_watermark_text: 'Transposto gratuitamente em app.rubsax.com.br',
+  },
 };
 
 const CACHE_TTL_MS = 60 * 1000;
@@ -130,6 +149,7 @@ function mergeSettingsWithDefaults(rows: Array<{ key: string; value: unknown }>)
     operations: { ...DEFAULT_APP_SETTINGS.operations },
     support_links: { ...DEFAULT_APP_SETTINGS.support_links },
     tutorial: { ...DEFAULT_APP_SETTINGS.tutorial },
+    free_pass: { ...DEFAULT_APP_SETTINGS.free_pass },
   };
 
   for (const row of rows) {
@@ -233,6 +253,36 @@ function mergeSettingsWithDefaults(rows: Array<{ key: string; value: unknown }>)
             ? val.youtube_input.trim()
             : merged.tutorial.youtube_input,
       };
+    } else if (row.key === 'free_pass') {
+      const rawCooldown = Number(val.cooldown_days ?? merged.free_pass.cooldown_days);
+      const rawUnlockHours = Number(val.unlock_hours ?? merged.free_pass.unlock_hours);
+      const rawMaxIp = Number(
+        val.max_ip_uses_per_cooldown ?? merged.free_pass.max_ip_uses_per_cooldown
+      );
+      merged.free_pass = {
+        enabled:
+          typeof val.enabled === 'boolean' ? val.enabled : merged.free_pass.enabled,
+        cooldown_days: Math.max(
+          1,
+          Math.min(365, Number.isFinite(rawCooldown) ? Math.round(rawCooldown) : 7)
+        ),
+        unlock_hours: Math.max(
+          1,
+          Math.min(168, Number.isFinite(rawUnlockHours) ? Math.round(rawUnlockHours) : 24)
+        ),
+        max_ip_uses_per_cooldown: Math.max(
+          1,
+          Math.min(50, Number.isFinite(rawMaxIp) ? Math.round(rawMaxIp) : 3)
+        ),
+        pdf_watermark_enabled:
+          typeof val.pdf_watermark_enabled === 'boolean'
+            ? val.pdf_watermark_enabled
+            : merged.free_pass.pdf_watermark_enabled,
+        pdf_watermark_text:
+          typeof val.pdf_watermark_text === 'string' && val.pdf_watermark_text.trim()
+            ? val.pdf_watermark_text.trim()
+            : merged.free_pass.pdf_watermark_text,
+      };
     }
   }
 
@@ -308,6 +358,10 @@ export async function saveAppSettings(
       key: 'tutorial',
       value: { ...current.tutorial, ...(nextPartial.tutorial || {}) },
     },
+    {
+      key: 'free_pass',
+      value: { ...current.free_pass, ...(nextPartial.free_pass || {}) },
+    },
   ]);
 
   const nowIso = new Date().toISOString();
@@ -318,6 +372,7 @@ export async function saveAppSettings(
     'operations',
     'support_links',
     'tutorial',
+    'free_pass',
   ];
 
   const payload = keysToPersist.map((key) => ({

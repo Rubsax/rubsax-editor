@@ -5,6 +5,7 @@ export interface ClientAuthUser {
   email: string;
   full_name: string | null;
   avatar_url: string | null;
+  email_confirmed_at?: string | null;
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {

@@ -37,11 +37,17 @@ function mapSupabaseRawUser(raw: Record<string, unknown>): AuthUser | null {
     (typeof meta.picture === 'string' && meta.picture) ||
     null;
 
+  const emailConfirmedAt =
+    (typeof raw.email_confirmed_at === 'string' && raw.email_confirmed_at) ||
+    (typeof raw.confirmed_at === 'string' && raw.confirmed_at) ||
+    null;
+
   return {
     id,
     email,
     full_name: fullName,
     avatar_url: avatarUrl,
+    email_confirmed_at: emailConfirmedAt,
   };
 }
 

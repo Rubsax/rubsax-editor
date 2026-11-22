@@ -27,6 +27,7 @@ interface AuthModalProps {
   onClose: () => void;
   onAuthenticated: (user: ClientAuthUser) => void;
   subtitle?: string;
+  googleNextPath?: string;
 }
 
 export default function AuthModal({
@@ -34,6 +35,7 @@ export default function AuthModal({
   onClose,
   onAuthenticated,
   subtitle,
+  googleNextPath = '/',
 }: AuthModalProps) {
   const [mode, setMode] = useState<AuthMode>('login');
   const [fullName, setFullName] = useState<string>('');
@@ -61,7 +63,7 @@ export default function AuthModal({
     setErrorMsg(null);
     setLoadingGoogle(true);
     try {
-      await signInWithGoogle('/');
+      await signInWithGoogle(googleNextPath);
     } catch (err: unknown) {
       setLoadingGoogle(false);
       setErrorMsg(
@@ -156,7 +158,7 @@ export default function AuthModal({
             type="button"
             disabled={loadingGoogle}
             onClick={() => void handleGoogleClick()}
-            className="w-full py-3 px-4 rounded-xl bg-white hover:bg-zinc-100 text-slate-900 font-extrabold text-sm flex items-center justify-center gap-2.5 shadow-lg active:scale-[0.99] transition disabled:opacity-60"
+            className="w-full py-3 px-4 rounded-xl bg-white hover:bg-zinc-100 text-slate-900 font-extrabold text-sm flex items-center justify-center gap-2.5 shadow-lg active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-60"
           >
             {loadingGoogle ? (
               <Loader2 className="w-4 h-4 animate-spin text-slate-800" />
@@ -294,7 +296,7 @@ export default function AuthModal({
             <button
               type="submit"
               disabled={submitting}
-              className="w-full py-2.5 px-4 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition disabled:opacity-50"
+              className="w-full py-2.5 px-4 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
             >
               {submitting ? (
                 <Loader2 className="w-4 h-4 animate-spin" />

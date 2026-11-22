@@ -1,12 +1,12 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { checkUserAccess } from '@/lib/access';
+import { resolveUserAccessSnapshot } from '@/lib/access';
 import {
   buildModifiedMsczBuffer,
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
+import { buildFreePassRestrictedMsczBuffer } from '@/lib/server/free-pass-transform';
 import { runMuseScoreHeadlessSvgPages } from '@/lib/server/musescore-cli';
-import { getAppSettings } from '@/lib/settings';
 import { logUsage } from '@/lib/supabase/admin';
 import { getServerSessionUser } from '@/lib/supabase/server';
 import { cropSvgForPreview } from '@/lib/svg-crop';
@@ -21,13 +21,17 @@ export async function POST(req: NextRequest) {
       originalBase64,
       fileName = 'partitura.mscz',
       modifiedMscx,
+      semitoneShift,
+      octaveShift,
     } = body as {
       originalBase64: string;
       fileName?: string;
-      modifiedMscx: string;
+      modifiedMscx?: string;
+      semitoneShift?: number;
+      octaveShift?: number;
     };
 
-    if (!originalBase64 || !modifiedMscx) {
+    if (!originalBase64) {
       return NextResponse.json(
         { error: 'Parâmetros insuficientes para renderização SVG.' },
         { status: 400 }
@@ -45,12 +49,11 @@ export async function POST(req: NextRequest) {
       .update(rawBuffer)
       .digest('hex');
 
-    const [user, settings] = await Promise.all([
-      getServerSessionUser(),
-      getAppSettings(),
-    ]);
-
-    const access = await checkUserAccess(user, resolvedFileHash);
+    const user = await getServerSessionUser();
+    const { access, settings } = await resolveUserAccessSnapshot(
+      user,
+      resolvedFileHash
+    );
 
     if (settings.operations.maintenance_mode && !access.isDev) {
       return NextResponse.json(
@@ -62,7 +65,28 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const msczBuffer = await buildModifiedMsczBuffer(rawBuffer, fileName, modifiedMscx);
+    let msczBuffer: Buffer;
+    if (access.level === 'free_pass') {
+      // Enforcement estrito no servidor: ignora modifiedMscx do cliente e força quebra automática
+      const built = await buildFreePassRestrictedMsczBuffer({
+        rawBuffer,
+        fileName,
+        fileHash: resolvedFileHash,
+        semitoneShift,
+        octaveShift,
+        isDev: access.isDev,
+      });
+      msczBuffer = built.msczBuffer;
+    } else {
+      if (!modifiedMscx) {
+        return NextResponse.json(
+          { error: 'Parâmetros insuficientes para renderização SVG.' },
+          { status: 400 }
+        );
+      }
+      msczBuffer = await buildModifiedMsczBuffer(rawBuffer, fileName, modifiedMscx);
+    }
+
     const svgPages = await runMuseScoreHeadlessSvgPages(msczBuffer, {
       isDev: access.isDev,
     });
@@ -109,6 +133,7 @@ export async function POST(req: NextRequest) {
       isPreview: false,
       accessLevel: access.level,
       isDev: access.isDev,
+      freeUnlockExpiresAt: access.freeUnlockExpiresAt || null,
       fileHash: resolvedFileHash,
     });
   } catch (err: unknown) {

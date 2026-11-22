@@ -6,6 +6,7 @@ import { AccountPanelContent } from '@/components/AccountModal';
 import AuthModal from '@/components/AuthModal';
 import PlansModal, { PlanCheckoutKind } from '@/components/PlansModal';
 import SmartBackButton from '@/components/SmartBackButton';
+import type { FreePassStatus } from '@/lib/access';
 import { DEFAULT_APP_SETTINGS, type AppSettings } from '@/lib/settings';
 import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import { ClientAuthUser, signOutUser } from '@/lib/supabase/client';
@@ -18,6 +19,7 @@ export default function ContaPage() {
   const [isDev, setIsDev] = useState<boolean>(false);
   const [activeSub, setActiveSub] = useState<SubscriptionRow | null>(null);
   const [activeUnlocks, setActiveUnlocks] = useState<SingleUnlockRow[]>([]);
+  const [freePassStatus, setFreePassStatus] = useState<FreePassStatus | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
@@ -34,11 +36,13 @@ export default function ContaPage() {
         setIsDev(Boolean(data.isDev));
         setActiveSub(data.activeSubscription || null);
         setActiveUnlocks(data.activeSingleUnlocks || []);
+        setFreePassStatus(data.freePassStatus || null);
         if (data.settings) {
           setAppSettings((prev) => ({
             ...prev,
             pricing: data.settings.pricing || prev.pricing,
             paywall: data.settings.paywall || prev.paywall,
+            free_pass: { ...prev.free_pass, ...(data.settings.free_pass || {}) },
           }));
         }
       }
@@ -135,7 +139,7 @@ export default function ContaPage() {
             <button
               type="button"
               onClick={() => setAuthModalOpen(true)}
-              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold"
+              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             >
               <LogIn className="w-4 h-4" />
               <span>Entrar com Google / E-mail</span>
@@ -148,6 +152,10 @@ export default function ContaPage() {
               isDev={isDev}
               activeSubscription={activeSub}
               activeSingleUnlocks={activeUnlocks}
+              freePassSettings={appSettings.free_pass}
+              freePassStatus={freePassStatus}
+              onOpenPlans={() => setPlansModalOpen(true)}
+              onFreePassExpired={() => void loadAccount()}
               onSignOut={async () => {
                 await signOutUser();
                 setUser(null);
@@ -186,6 +194,9 @@ export default function ContaPage() {
         user={user}
         pricing={appSettings.pricing}
         paywall={appSettings.paywall}
+        freePassSettings={appSettings.free_pass}
+        freePassStatus={freePassStatus}
+        onFreePassExpired={() => void loadAccount()}
         initialPlanToStart={initialPlan}
         onRequireLogin={() => setAuthModalOpen(true)}
         onPaymentApproved={() => {

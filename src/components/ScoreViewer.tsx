@@ -1,7 +1,10 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { AccessLevel, FreePassStatus } from '@/lib/access';
 import { FloatingTextBox, ScoreLayoutViewMode } from '@/lib/music/mscz-engine';
+import type { FreePassSettings } from '@/lib/settings';
+import FreePassCountdown from './FreePassCountdown';
 import {
   Lock,
   Loader2,
@@ -15,6 +18,9 @@ import {
   ChevronRight,
   X,
   Unlock,
+  Sparkles,
+  LogIn,
+  Crown,
 } from 'lucide-react';
 
 export type CanvasThemeMode = 'parchment' | 'white';
@@ -24,6 +30,8 @@ interface ScoreViewerProps {
   modifiedMscx: string;
   originalBase64: string;
   fileName: string;
+  semitoneShift: number;
+  octaveShift: number;
   canvasTheme: CanvasThemeMode;
   onThemeChange: (theme: CanvasThemeMode) => void;
   viewMode: ScoreLayoutViewMode;
@@ -31,13 +39,21 @@ interface ScoreViewerProps {
   floatingTexts: FloatingTextBox[];
   onUpdateFloatingTextPosition: (id: string, xPercent: number, yPercent: number) => void;
   renderVersion: number;
-  hasUnrenderedChanges: boolean;
   onRequestPreview: () => void;
   onLoadingChange?: (loading: boolean) => void;
   activeActionId?: string | null;
   loadingReason?: ScoreLoadingReason;
   ctaButtonText?: string;
-  onOpenPlansModal?: () => void;
+  accessLevel: AccessLevel;
+  freePassSettings: FreePassSettings;
+  freePassStatus: FreePassStatus | null;
+  isAuthenticated: boolean;
+  isClaimingFreePass?: boolean;
+  freePassError?: string | null;
+  onRequireLoginForFreePass?: () => void;
+  onClaimFreePass?: () => void;
+  onFreePassExpired?: () => void;
+  onOpenPlansModal?: (reason?: 'fullscreen' | 'pro' | 'default') => void;
   onPreviewStateChange?: (state: { isPreview: boolean; totalPages: number }) => void;
 }
 
@@ -52,6 +68,8 @@ export default function ScoreViewer({
   modifiedMscx,
   originalBase64,
   fileName,
+  semitoneShift,
+  octaveShift,
   canvasTheme,
   onThemeChange,
   viewMode,
@@ -59,12 +77,20 @@ export default function ScoreViewer({
   floatingTexts,
   onUpdateFloatingTextPosition,
   renderVersion,
-  hasUnrenderedChanges,
   onRequestPreview,
   onLoadingChange,
   activeActionId,
   loadingReason = 'editing',
   ctaButtonText,
+  accessLevel,
+  freePassSettings,
+  freePassStatus,
+  isAuthenticated,
+  isClaimingFreePass = false,
+  freePassError = null,
+  onRequireLoginForFreePass,
+  onClaimFreePass,
+  onFreePassExpired,
   onOpenPlansModal,
   onPreviewStateChange,
 }: ScoreViewerProps) {
@@ -107,6 +133,8 @@ export default function ScoreViewer({
             originalBase64,
             fileName,
             modifiedMscx,
+            semitoneShift,
+            octaveShift,
           }),
         });
         const data = await res.json();
@@ -343,6 +371,10 @@ export default function ScoreViewer({
 
   const isSwitchingToPortrait = svgLoading && activeActionId === 'view-portrait';
   const isSwitchingToFullScore = svgLoading && activeActionId === 'view-full-score';
+  const isFullscreenLocked =
+    isPreview || accessLevel === 'preview' || accessLevel === 'free_pass';
+  const isProToolbarLocked =
+    accessLevel === 'preview' || accessLevel === 'free_pass';
 
   const loadingCopy =
     loadingReason === 'unlocking'
@@ -410,7 +442,7 @@ export default function ScoreViewer({
               type="button"
               disabled={currentVisiblePage <= 1}
               onClick={() => scrollToPage(currentVisiblePage - 1)}
-              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-95 transition-transform duration-75 touch-manipulation"
+              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               title="Página Anterior"
             >
               <ChevronLeft className="w-4 h-4" />
@@ -422,7 +454,7 @@ export default function ScoreViewer({
               type="button"
               disabled={currentVisiblePage >= (svgPages.length || 1)}
               onClick={() => scrollToPage(currentVisiblePage + 1)}
-              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-95 transition-transform duration-75 touch-manipulation"
+              className="p-1 rounded text-zinc-300 hover:text-sax-400 disabled:opacity-30 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               title="Próxima Página"
             >
               <ChevronRight className="w-4 h-4" />
@@ -435,7 +467,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={() => onThemeChange('parchment')}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   canvasTheme === 'parchment'
                     ? 'bg-[#F4E8C1] text-stone-900 font-bold shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
@@ -446,7 +478,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={() => onThemeChange('white')}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   canvasTheme === 'white'
                     ? 'bg-white text-slate-900 font-bold shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
@@ -459,7 +491,7 @@ export default function ScoreViewer({
             <button
               type="button"
               onClick={() => void exitFullscreen()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/90 hover:bg-red-500 text-white font-bold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600/90 hover:bg-red-500 text-white font-bold shadow-sm active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               title="Sair da Tela Cheia (ESC)"
             >
               <X className="w-3.5 h-3.5" />
@@ -482,7 +514,7 @@ export default function ScoreViewer({
                 if (svgLoading || viewMode === 'portrait') return;
                 onViewModeChange('portrait');
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
                 viewMode === 'portrait'
                   ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
                   : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
@@ -501,39 +533,40 @@ export default function ScoreViewer({
               type="button"
               disabled={svgLoading}
               onClick={() => {
+                if (isProToolbarLocked) {
+                  onOpenPlansModal?.('pro');
+                  return;
+                }
                 if (svgLoading || viewMode === 'full-score') return;
                 onViewModeChange('full-score');
               }}
-              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
-                viewMode === 'full-score'
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed ${
+                isProToolbarLocked
+                  ? 'bg-zinc-800/70 text-zinc-400 border border-zinc-700/80 hover:border-sax-500/40'
+                  : viewMode === 'full-score'
                   ? 'bg-[#D97706] text-studio-950 shadow-sm font-bold ring-1 ring-sax-400'
                   : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
               }`}
-              title="Exibe todas as pautas do arquivo simultaneamente empilhadas no mesmo sistema"
+              title={
+                isProToolbarLocked
+                  ? 'Grade Completa disponível nos planos Avulso e Mensal (PRO)'
+                  : 'Exibe todas as pautas do arquivo simultaneamente empilhadas no mesmo sistema'
+              }
             >
               {isSwitchingToFullScore ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : isProToolbarLocked ? (
+                <Lock className="w-3.5 h-3.5 text-sax-400" />
               ) : (
                 <Layers className="w-3.5 h-3.5" />
               )}
-              <span>Grade Completa (Pautas Empilhadas)</span>
+              <span>Grade Completa</span>
+              {isProToolbarLocked && (
+                <span className="px-1.5 py-0.5 rounded bg-sax-500/20 text-sax-300 text-[9px] font-extrabold uppercase tracking-wider">
+                  PRO
+                </span>
+              )}
             </button>
-
-            {hasUnrenderedChanges && (
-              <button
-                type="button"
-                disabled={svgLoading}
-                onClick={onRequestPreview}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 disabled:cursor-not-allowed text-studio-950 font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
-              >
-                {svgLoading ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="w-3.5 h-3.5" />
-                )}
-                <span>Aplicar Alterações</span>
-              </button>
-            )}
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
@@ -542,7 +575,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={() => onThemeChange('parchment')}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   canvasTheme === 'parchment'
                     ? 'bg-[#F4E8C1] text-stone-900 font-bold shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
@@ -553,7 +586,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={() => onThemeChange('white')}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-95 transition-transform duration-75 touch-manipulation ${
+                className={`px-2.5 py-1 rounded-md text-xs font-medium active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   canvasTheme === 'white'
                     ? 'bg-white text-slate-900 font-bold shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
@@ -563,33 +596,68 @@ export default function ScoreViewer({
               </button>
             </div>
 
-            {/* Botão Destacado de Tela Cheia (Expandir Visor) ou Cadeado em Modo Prévia */}
+            {/* Botão de Tela Cheia (Exclusivo PRO: Avulso, Mensal e Dev) */}
             <button
               type="button"
               onClick={() => {
-                if (isPreview) {
-                  onOpenPlansModal?.();
+                if (isFullscreenLocked) {
+                  onOpenPlansModal?.('fullscreen');
                   return;
                 }
                 void enterFullscreen();
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500/20 hover:bg-sax-500/30 border border-sax-500/50 text-sax-300 font-bold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-bold shadow-sm active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
+                isFullscreenLocked
+                  ? 'bg-zinc-800/80 hover:bg-zinc-800 border-zinc-700 text-zinc-300'
+                  : 'bg-sax-500/20 hover:bg-sax-500/30 border-sax-500/50 text-sax-300'
+              }`}
               title={
-                isPreview
-                  ? 'Modo Prévia: desbloqueie a partitura para usar Tela Cheia'
+                isFullscreenLocked
+                  ? 'Tela Cheia exclusiva dos planos Avulso e Mensal (PRO)'
                   : 'Expandir Visor para Tela Cheia'
               }
             >
-              {isPreview ? (
+              {isFullscreenLocked ? (
                 <Lock className="w-3.5 h-3.5 text-sax-400" />
               ) : (
                 <Maximize2 className="w-3.5 h-3.5 text-sax-400" />
               )}
               <span>Tela Cheia</span>
+              {isFullscreenLocked && (
+                <span className="px-1.5 py-0.5 rounded bg-sax-500/20 text-sax-300 text-[9px] font-extrabold uppercase tracking-wider">
+                  PRO
+                </span>
+              )}
             </button>
           </div>
         </div>
       )}
+
+      {/* Tarja de Passe Gratuito Ativo no Topo do Visor */}
+      {!isFullscreen &&
+        accessLevel === 'free_pass' &&
+        freePassStatus?.activeUnlock?.expiresAt && (
+          <div className="px-3 sm:px-4 py-2 bg-emerald-950/65 border-b border-emerald-500/35 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-emerald-200">
+              <FreePassCountdown
+                targetIso={freePassStatus.activeUnlock.expiresAt}
+                mode="active"
+                onExpire={onFreePassExpired}
+                className="text-emerald-300"
+              />
+              <span className="text-[11px] text-emerald-200/85">
+                • Só Tom/Oitava e quebra automática (PDF com rodapé)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onOpenPlansModal?.('pro')}
+              className="px-2.5 py-1 rounded-lg bg-[#D97706] hover:bg-sax-400 text-studio-950 text-[11px] font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+            >
+              Liberar Completo (PRO)
+            </button>
+          </div>
+        )}
 
       {/* Área Central da Partitura (Scrollable, 100% Fiel MuseScore SVG) */}
       <div
@@ -613,7 +681,7 @@ export default function ScoreViewer({
               <button
                 type="button"
                 onClick={onRequestPreview}
-                className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500 text-studio-950 font-bold hover:bg-sax-400 active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sax-500 text-studio-950 font-bold hover:bg-sax-400 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Tentar Novamente</span>
@@ -658,7 +726,7 @@ export default function ScoreViewer({
 
                 {/* Paywall CTA em Modo Prévia (exibido logo abaixo do recorte da Página 1) */}
                 {isPreview && idx === 0 && (
-                  <div className="relative px-4 sm:px-8 py-8 sm:py-10 bg-gradient-to-t from-studio-950 via-studio-950/95 to-studio-950/75 text-zinc-100 border-t border-sax-500/30 flex flex-col items-center text-center gap-3">
+                  <div className="relative px-4 sm:px-8 py-7 sm:py-9 bg-gradient-to-t from-studio-950 via-studio-950/95 to-studio-950/80 text-zinc-100 border-t border-sax-500/30 flex flex-col items-center text-center gap-4">
                     <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-sax-500/15 border border-sax-500/40 text-sax-300 text-[11px] font-bold">
                       <Lock className="w-3.5 h-3.5" />
                       <span>
@@ -666,20 +734,121 @@ export default function ScoreViewer({
                         {(totalPagesCount || 1) === 1 ? 'página' : 'páginas'}
                       </span>
                     </div>
-                    <p className="text-xs sm:text-sm text-zinc-300 max-w-md">
-                      Gostou da transposição e diagramação? Desbloqueie todas as páginas, Tela
-                      Cheia e exportação em PDF de alta definição.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => onOpenPlansModal?.()}
-                      className="inline-flex items-center gap-2 px-6 py-3 rounded-2xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold shadow-xl shadow-sax-500/20 active:scale-95 transition-transform duration-75 touch-manipulation"
+
+                    <div
+                      className={`grid gap-3.5 w-full ${
+                        freePassSettings.enabled
+                          ? 'grid-cols-1 md:grid-cols-2 max-w-3xl'
+                          : 'grid-cols-1 max-w-md'
+                      }`}
                     >
-                      <Unlock className="w-4 h-4" />
-                      <span>
-                        {ctaButtonText || serverCtaText || 'Visualizar partitura inteira'}
-                      </span>
-                    </button>
+                      {/* Opção 1: Modo Gratuito (1 música a cada X dias) */}
+                      {freePassSettings.enabled && (
+                        <div className="p-4 sm:p-5 rounded-2xl bg-studio-900/95 border border-emerald-500/40 text-left flex flex-col justify-between gap-3.5 shadow-lg">
+                          <div className="space-y-1.5">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 text-[10px] font-extrabold uppercase tracking-wider">
+                              <Sparkles className="w-3 h-3" />
+                              Passe Gratuito
+                            </span>
+                            <h4 className="text-sm sm:text-base font-extrabold text-white">
+                              Liberar Grátis (1 música / {freePassSettings.cooldown_days}{' '}
+                              {freePassSettings.cooldown_days === 1 ? 'dia' : 'dias'})
+                            </h4>
+                            <p className="text-[11px] text-zinc-300 leading-relaxed">
+                              Só tom e oitava • {freePassSettings.unlock_hours}h para editar •
+                              quebra automática • exige login
+                            </p>
+                          </div>
+
+                          {freePassError && (
+                            <p className="p-2 rounded-lg bg-red-950/70 border border-red-500/40 text-[11px] text-red-200 font-semibold">
+                              {freePassError}
+                            </p>
+                          )}
+
+                          {!isAuthenticated ? (
+                            <button
+                              type="button"
+                              onClick={() => onRequireLoginForFreePass?.()}
+                              className="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shadow-md active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                            >
+                              <LogIn className="w-3.5 h-3.5" />
+                              <span>Entrar para Liberar Grátis</span>
+                            </button>
+                          ) : freePassStatus?.state === 'email_unconfirmed' ? (
+                            <div className="p-2.5 rounded-xl bg-amber-950/50 border border-amber-500/40 text-[11px] text-amber-200 font-semibold leading-snug">
+                              Confirme seu endereço de e-mail para ativar o Passe Gratuito (ou entre
+                              com o Google).
+                            </div>
+                          ) : freePassStatus?.state === 'cooldown' &&
+                            freePassStatus.cooldownUntil ? (
+                            <div className="p-2.5 rounded-xl bg-zinc-900 border border-amber-500/30 space-y-1">
+                              <FreePassCountdown
+                                targetIso={freePassStatus.cooldownUntil}
+                                mode="cooldown"
+                                onExpire={onFreePassExpired}
+                                className="text-amber-300 text-xs"
+                              />
+                              <p className="text-[11px] text-zinc-400">
+                                Deseja liberar agora sem esperar? Escolha o plano PRO ao lado.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              <button
+                                type="button"
+                                disabled={isClaimingFreePass}
+                                onClick={() => onClaimFreePass?.()}
+                                className="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-studio-950 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shadow-md active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                              >
+                                {isClaimingFreePass ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                )}
+                                <span>
+                                  {isClaimingFreePass
+                                    ? 'Liberando partitura...'
+                                    : 'Usar meu Passe Gratuito nesta música'}
+                                </span>
+                              </button>
+                              <p className="text-[10px] text-zinc-400 text-center">
+                                Confirmação em 1 clique: libera esta música por{' '}
+                                {freePassSettings.unlock_hours}h.
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Opção 2: Desbloquear Completo (PRO) */}
+                      <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-b from-sax-500/15 to-studio-900 border-2 border-sax-500/60 text-left flex flex-col justify-between gap-3.5 shadow-lg">
+                        <div className="space-y-1.5">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sax-500/20 border border-sax-500/40 text-sax-300 text-[10px] font-extrabold uppercase tracking-wider">
+                            <Crown className="w-3 h-3" />
+                            Planos PRO
+                          </span>
+                          <h4 className="text-sm sm:text-base font-extrabold text-white">
+                            Desbloquear Completo (PRO)
+                          </h4>
+                          <p className="text-[11px] text-zinc-300 leading-relaxed">
+                            Todas as gavetas, Pautas Internas, Tela Cheia, quebras manuais e PDF
+                            limpo em alta definição.
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => onOpenPlansModal?.('pro')}
+                          className="w-full py-2.5 px-5 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold inline-flex items-center justify-center gap-2 shadow-xl shadow-sax-500/20 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                        >
+                          <Unlock className="w-4 h-4" />
+                          <span>
+                            {ctaButtonText || serverCtaText || 'Visualizar partitura inteira'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
 

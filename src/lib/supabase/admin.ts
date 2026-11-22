@@ -3,6 +3,18 @@ export interface AuthUser {
   email: string;
   full_name: string | null;
   avatar_url: string | null;
+  email_confirmed_at?: string | null;
+}
+
+export interface FreeUnlockRow {
+  id: string;
+  user_id: string;
+  file_hash: string;
+  file_name: string | null;
+  ip_hash: string | null;
+  unlocked_at: string;
+  expires_at: string;
+  cooldown_until: string;
 }
 
 export interface ProfileRow {

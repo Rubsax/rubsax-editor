@@ -57,10 +57,15 @@ export default function PrivacidadePage() {
               endereço de e-mail e URL de foto de perfil fornecida pelo Google OAuth ou no cadastro.
             </li>
             <li>
-              <strong className="text-zinc-200">Registros de Acesso e Planos:</strong> identificador
-              de assinatura/pagamento, hash criptográfico SHA-256 dos arquivos avulsos desbloqueados
-              (para reconhecer seu desbloqueio por 24 horas mesmo trocando de dispositivo), registros
-              de consentimento legal e contagem técnica de uso.
+              <strong className="text-zinc-200">Registros de Acesso, Planos e Anti-Abuso:</strong>{' '}
+              identificador de assinatura/pagamento, hash criptográfico SHA-256 dos arquivos avulsos
+              ou gratuitos desbloqueados (para reconhecer seu desbloqueio mesmo trocando de
+              dispositivo), registros de consentimento legal, contagem técnica de uso e{' '}
+              <strong className="text-white">
+                hash anônimo irreversível de IP (<code className="text-sax-300">ip_hash = SHA-256(IP + salt do servidor)</code>)
+              </strong>{' '}
+              utilizado estritamente para prevenção de fraude e criação abusiva de múltiplas contas
+              no Modo Gratuito, sem jamais armazenar o endereço IP em texto puro no banco de dados.
             </li>
           </ul>
         </section>
@@ -108,14 +113,28 @@ export default function PrivacidadePage() {
 
         <section className="space-y-3 text-sm leading-relaxed text-zinc-300">
           <h2 className="text-lg font-bold text-sax-400">
-            4. Uso de Cookies e Armazenamento Local
+            4. Uso de Cookies e Armazenamento Local no Navegador
           </h2>
           <p>
             Utilizamos cookies essenciais <code className="text-sax-300">HttpOnly</code> para manter
-            sua sessão autenticada com segurança, além do{' '}
-            <code className="text-sax-300">localStorage</code> do navegador para lembrar preferências
-            como o aceite do Termo de Direitos Autorais no upload. Não utilizamos cookies para venda
-            de dados ou rastreamento publicitário invasivo.
+            sua sessão autenticada com segurança, além de mecanismos locais do próprio navegador:
+          </p>
+          <ul className="list-disc pl-6 space-y-1.5 text-zinc-400">
+            <li>
+              <strong className="text-zinc-200">IndexedDB:</strong> guarda temporariamente apenas no
+              seu aparelho o arquivo de partitura aberto e suas alterações (tom, oitava, cifras,
+              cabeçalho e escala) para que você não perca seu trabalho ao recarregar a página (F5),
+              fazer login ou voltar de outra tela.
+            </li>
+            <li>
+              <strong className="text-zinc-200">sessionStorage / localStorage:</strong> preserva a
+              rota anterior para o botão &ldquo;Voltar&rdquo; e registra preferências de interface,
+              como o aceite do Termo de Direitos Autorais.
+            </li>
+          </ul>
+          <p>
+            Esses dados locais permanecem exclusivamente no dispositivo do usuário. Não utilizamos
+            cookies para venda de dados ou rastreamento publicitário invasivo.
           </p>
         </section>
 

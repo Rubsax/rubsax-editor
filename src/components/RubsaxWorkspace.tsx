@@ -27,8 +27,8 @@ import {
   computeFileSha256Hex,
   signOutUser,
 } from '@/lib/supabase/client';
+import type { AccessLevel, FreePassStatus } from '@/lib/access';
 import ScoreViewer, { CanvasThemeMode, ScoreLoadingReason } from './ScoreViewer';
-import BbEbChordModal from './BbEbChordModal';
 import EcosystemFooter from './EcosystemFooter';
 import AuthModal from './AuthModal';
 import PlansModal, { type PlanCheckoutKind } from './PlansModal';
@@ -73,7 +73,11 @@ import {
   PlayCircle,
   Music,
   ExternalLink,
+  HelpCircle,
 } from 'lucide-react';
+
+const LOCKED_PRO_BANNER_TEXT =
+  'Recurso PRO (Avulso ou Mensal) • O Modo Gratuito libera apenas Transposição & Oitava';
 
 type TransposeDirectionMode = 'closest' | 'up' | 'down';
 type SystemBreakMode = 'initial' | 'auto' | 'every-x' | 'custom';
@@ -102,9 +106,15 @@ export default function RubsaxWorkspace() {
   // Sessão Auth, Modo Dev, Configurações Dinâmicas & Controle de Acesso
   const [authUser, setAuthUser] = useState<ClientAuthUser | null>(null);
   const [isDev, setIsDev] = useState<boolean>(false);
-  const [accessLevel, setAccessLevel] = useState<'dev' | 'subscription' | 'single' | 'preview'>('preview');
+  const [accessLevel, setAccessLevel] = useState<AccessLevel>('preview');
   const [activeSubscription, setActiveSubscription] = useState<SubscriptionRow | null>(null);
   const [activeSingleUnlocks, setActiveSingleUnlocks] = useState<SingleUnlockRow[]>([]);
+  const [freePassStatus, setFreePassStatus] = useState<FreePassStatus | null>(null);
+  const [isClaimingFreePass, setIsClaimingFreePass] = useState<boolean>(false);
+  const [freePassError, setFreePassError] = useState<string | null>(null);
+  const [plansModalReason, setPlansModalReason] = useState<'fullscreen' | 'pro' | 'default'>(
+    'default'
+  );
   const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [fileHash, setFileHash] = useState<string>('');
   const [viewerPreviewState, setViewerPreviewState] = useState<{
@@ -127,7 +137,7 @@ export default function RubsaxWorkspace() {
   const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true);
 
   const fileHashRef = useRef<string>('');
-  const accessLevelRef = useRef<'dev' | 'subscription' | 'single' | 'preview'>('preview');
+  const accessLevelRef = useRef<AccessLevel>('preview');
   const analysisRef = useRef<ScoreAnalysis | null>(null);
   const hasExplicitViewChoiceRef = useRef<boolean>(false);
   const isSessionHydratedRef = useRef<boolean>(false);
@@ -193,7 +203,6 @@ export default function RubsaxWorkspace() {
 
   // Viewer & Modals
   const [canvasTheme, setCanvasTheme] = useState<CanvasThemeMode>('parchment');
-  const [showBbEbModal, setShowBbEbModal] = useState<boolean>(false);
   const [showUnappliedChangesModal, setShowUnappliedChangesModal] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<MobileTabId>('transpose');
   const [renderVersion, setRenderVersion] = useState<number>(0);
@@ -205,6 +214,14 @@ export default function RubsaxWorkspace() {
   const wasSvgLoadingRef = useRef<boolean>(false);
 
   const isProcessing = isSvgLoading || isTransformComputing;
+
+  const openPlansModal = useCallback(
+    (reason: 'fullscreen' | 'pro' | 'default' = 'default') => {
+      setPlansModalReason(reason);
+      setPlansModalOpen(true);
+    },
+    []
+  );
 
   const refreshAuthAndSettings = useCallback(
     async (
@@ -218,8 +235,7 @@ export default function RubsaxWorkspace() {
         if (!res.ok) return null;
         const data = await res.json();
         const prevLevel = accessLevelRef.current;
-        const nextLevel: 'dev' | 'subscription' | 'single' | 'preview' =
-          data.access?.level || 'preview';
+        const nextLevel: AccessLevel = data.access?.level || 'preview';
 
         setAuthUser(data.user || null);
         setIsDev(Boolean(data.isDev));
@@ -227,6 +243,7 @@ export default function RubsaxWorkspace() {
         setAccessLevel(nextLevel);
         setActiveSubscription(data.activeSubscription || null);
         setActiveSingleUnlocks(data.activeSingleUnlocks || []);
+        setFreePassStatus(data.freePassStatus || null);
 
         if (data.settings) {
           setAppSettings((prev) => ({
@@ -237,16 +254,16 @@ export default function RubsaxWorkspace() {
             operations: { ...prev.operations, ...(data.settings.operations || {}) },
             support_links: data.settings.support_links || prev.support_links,
             tutorial: { ...prev.tutorial, ...(data.settings.tutorial || {}) },
+            free_pass: { ...prev.free_pass, ...(data.settings.free_pass || {}) },
           }));
         }
 
-        const accessVisibilityChanged =
-          (prevLevel === 'preview') !== (nextLevel === 'preview');
+        const accessChanged = prevLevel !== nextLevel;
 
         if (
           analysisRef.current &&
           (reloadMode === 'force' ||
-            (reloadMode === 'if-access-changed' && accessVisibilityChanged))
+            (reloadMode === 'if-access-changed' && accessChanged))
         ) {
           setLoadingReason(nextLevel !== 'preview' ? 'unlocking' : 'logout');
           setRenderVersion((v) => v + 1);
@@ -259,6 +276,42 @@ export default function RubsaxWorkspace() {
     },
     []
   );
+
+  const handleClaimFreePass = useCallback(async () => {
+    if (!fileHashRef.current || isClaimingFreePass) return;
+    setFreePassError(null);
+    setIsClaimingFreePass(true);
+    try {
+      const res = await fetch('/api/free-pass/claim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileHash: fileHashRef.current,
+          fileName: analysisRef.current?.fileName || 'Partitura',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        setAuthModalOpen(true);
+        return;
+      }
+      if (!res.ok) {
+        setFreePassError(data.error || 'Não foi possível liberar o Passe Gratuito.');
+        await refreshAuthAndSettings(fileHashRef.current, 'none');
+        return;
+      }
+
+      // Alinha visualmente as quebras automáticas no cliente sem disparar duplo render
+      skipNextAutoTransformRef.current = true;
+      setLineBreakMeasures([]);
+      setSystemBreakMode('auto');
+      setPlansModalOpen(false);
+      setLoadingReason('unlocking');
+      await refreshAuthAndSettings(fileHashRef.current, 'force');
+    } finally {
+      setIsClaimingFreePass(false);
+    }
+  }, [isClaimingFreePass, refreshAuthAndSettings]);
 
   // Bootstrap inicial: restaura localStorage, sessão salva no IndexedDB e autenticação do usuário
   useEffect(() => {
@@ -485,6 +538,8 @@ export default function RubsaxWorkspace() {
     setAccessLevel('preview');
     setActiveSubscription(null);
     setActiveSingleUnlocks([]);
+    setFreePassStatus(null);
+    setFreePassError(null);
     if (hadFullAccess && analysisRef.current) {
       setLoadingReason('logout');
       setRenderVersion((v) => v + 1);
@@ -675,18 +730,13 @@ export default function RubsaxWorkspace() {
         renderedSnapshotMscxRef.current = initialTransform.modifiedMscx;
         setRenderedSnapshotMscx(initialTransform.modifiedMscx);
         hasExplicitViewChoiceRef.current = true;
+        setFreePassError(null);
         setWorkspaceView('editor');
         setLoadingReason('initial');
         if (typeof window !== 'undefined') {
           window.history.replaceState(null, '', '/?view=editor');
         }
         setRenderVersion((v) => v + 1);
-
-        if (scoreAnalysis.needsBbEbChordPrompt) {
-          setShowBbEbModal(true);
-        } else {
-          setShowBbEbModal(false);
-        }
       } catch (err: unknown) {
         const msg =
           err instanceof Error ? err.message : UNSUPPORTED_FORMAT_MESSAGE;
@@ -1049,6 +1099,8 @@ export default function RubsaxWorkspace() {
           fileName: analysis.fileName,
           modifiedMscx: pdfTransform.modifiedMscx,
           customPdfName,
+          semitoneShift,
+          octaveShift,
         }),
       });
 
@@ -1087,13 +1139,146 @@ export default function RubsaxWorkspace() {
     appSettings.paywall.paywall_enabled !== false &&
     accessLevel === 'preview';
 
+  const areProDrawersLocked =
+    !isDev &&
+    appSettings.paywall.paywall_enabled !== false &&
+    (accessLevel === 'preview' || accessLevel === 'free_pass');
+
   const maintenanceBlocked =
     Boolean(appSettings.operations.maintenance_mode) && !isDev;
+
+  const firstVisibleStaffId = analysis?.staves[0]?.staffId || '1';
+  const isTransposeModified = semitoneShift !== 0 || octaveShift !== 0;
+  const isChordsModified =
+    !showChords ||
+    !showLyrics ||
+    convertBbEbChordsToWritten ||
+    Object.keys(chordOverrides).length > 0;
+  const areXmlHeadersModified = analysis
+    ? headers.showAllHeaders !== analysis.headers.showAllHeaders ||
+      headers.title.text !== analysis.headers.title.text ||
+      headers.title.visible !== analysis.headers.title.visible ||
+      headers.title.removed !== analysis.headers.title.removed ||
+      headers.subtitle.text !== analysis.headers.subtitle.text ||
+      headers.subtitle.visible !== analysis.headers.subtitle.visible ||
+      headers.subtitle.removed !== analysis.headers.subtitle.removed ||
+      headers.composer.text !== analysis.headers.composer.text ||
+      headers.composer.visible !== analysis.headers.composer.visible ||
+      headers.composer.removed !== analysis.headers.composer.removed ||
+      headers.composer.autoSyncInstrument !== analysis.headers.composer.autoSyncInstrument ||
+      headers.lyricist.text !== analysis.headers.lyricist.text ||
+      headers.lyricist.visible !== analysis.headers.lyricist.visible ||
+      headers.lyricist.removed !== analysis.headers.lyricist.removed ||
+      headers.lyricist.autoSyncPianoKey !== analysis.headers.lyricist.autoSyncPianoKey
+    : false;
+  const isHeadersModified = floatingTexts.length > 0 || areXmlHeadersModified;
+  const isScaleModified = staffScalePercent !== 100;
+  const isBreaksModified = analysis
+    ? lineBreakMeasures.length !== analysis.initialLineBreakMeasures.length ||
+      lineBreakMeasures.some((m, i) => m !== analysis.initialLineBreakMeasures[i])
+    : lineBreakMeasures.length > 0;
+  const isStavesModified =
+    viewMode !== 'portrait' ||
+    selectedStaffIds.length !== 1 ||
+    selectedStaffIds[0] !== firstVisibleStaffId;
+
+  const handleResetTranspose = () => {
+    if (isSvgLoading || !isTransposeModified) return;
+    scheduleScoreAction('transpose-reset', 45);
+    setSemitoneShift(0);
+    setOctaveShift(0);
+  };
+
+  const handleResetChords = () => {
+    if (isSvgLoading || !isChordsModified || areProDrawersLocked) return;
+    scheduleScoreAction('chords-drawer-reset', 45);
+    setShowChords(true);
+    setShowLyrics(true);
+    setConvertBbEbChordsToWritten(false);
+    setChordOverrides({});
+    setEditingChordKey(null);
+  };
+
+  const handleResetHeaders = () => {
+    if (!analysis || isSvgLoading || !isHeadersModified || areProDrawersLocked) return;
+    if (areXmlHeadersModified) {
+      scheduleScoreAction('headers-drawer-reset', 45);
+    }
+    setHeaders(analysis.headers);
+    setFloatingTexts([]);
+  };
+
+  const handleResetScale = () => {
+    if (isSvgLoading || !isScaleModified || areProDrawersLocked) return;
+    handleChangeStaffScale(100, 'scale-drawer-reset', 45);
+  };
+
+  const handleResetBreaks = () => {
+    if (!analysis || isSvgLoading || !isBreaksModified || areProDrawersLocked) return;
+    scheduleScoreAction('breaks-drawer-reset', 45);
+    setLineBreakMeasures(analysis.initialLineBreakMeasures);
+    setSystemBreakMode(
+      analysis.initialLineBreakMeasures.length > 0 ? 'initial' : 'auto'
+    );
+  };
+
+  const handleResetStaves = () => {
+    if (isSvgLoading || !isStavesModified || areProDrawersLocked) return;
+    scheduleScoreAction('staves-drawer-reset', 45);
+    setViewMode('portrait');
+    setSelectedStaffIds([firstVisibleStaffId]);
+  };
+
+  const renderDrawerCornerAction = (params: {
+    proLocked?: boolean;
+    modified: boolean;
+    actionId: string;
+    onReset: () => void;
+  }) => {
+    if (params.proLocked) {
+      return (
+        <button
+          type="button"
+          onClick={() => openPlansModal('pro')}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sax-500/15 hover:bg-sax-500/25 border border-sax-500/40 text-sax-300 text-[10px] font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+          title="Desbloqueie os planos PRO para usar esta gaveta"
+        >
+          <Lock className="w-3 h-3" />
+          <span>PRO</span>
+        </button>
+      );
+    }
+
+    return (
+      <button
+        type="button"
+        disabled={!params.modified || isSvgLoading}
+        onClick={params.onReset}
+        title={
+          params.modified
+            ? 'Restaurar esta gaveta para o original do arquivo'
+            : 'Esta gaveta está no padrão original'
+        }
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
+          params.modified
+            ? 'bg-sax-500/15 hover:bg-sax-500/25 border-sax-500/45 text-sax-300'
+            : 'bg-zinc-900/60 border-zinc-800 text-zinc-500 opacity-55 cursor-default'
+        }`}
+      >
+        {isProcessing && activeActionId === params.actionId ? (
+          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+        ) : (
+          <RotateCcw className="w-2.5 h-2.5" />
+        )}
+        <span>Resetar</span>
+      </button>
+    );
+  };
 
   const handleRequestExportPdf = () => {
     if (isExportingPdf) return;
     if (isPreviewLocked) {
-      setPlansModalOpen(true);
+      openPlansModal('pro');
       return;
     }
     if (isProcessing || hasUnrenderedChanges) {
@@ -1228,7 +1413,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={handleGoEditor}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-sm active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <Sliders className="w-3.5 h-3.5" />
                 <span>{analysis ? 'Voltar ao Editor' : 'Ir ao Editor'}</span>
@@ -1239,18 +1424,26 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setTutorialModalOpen(true)}
-                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-200 text-xs font-extrabold border border-red-500/40 active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-200 text-xs font-extrabold border border-red-500/40 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <PlayCircle className="w-3.5 h-3.5 text-red-400" />
                 <span>Tutorial</span>
               </button>
             )}
 
+            <Link
+              href="/ajuda"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+            >
+              <HelpCircle className="w-3.5 h-3.5 text-sax-400" />
+              <span>Ajuda / FAQ</span>
+            </Link>
+
             <a
               href={appSettings.support_links.catalog_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-95 transition-transform duration-75 touch-manipulation"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             >
               <BookOpen className="w-3.5 h-3.5 text-sax-400" />
               <span>Catálogo</span>
@@ -1260,7 +1453,7 @@ export default function RubsaxWorkspace() {
               href={appSettings.support_links.store_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-sax-500/20 hover:bg-sax-500/30 text-sax-300 text-xs font-extrabold border border-sax-500/50 shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-sax-500/20 hover:bg-sax-500/30 text-sax-300 text-xs font-extrabold border border-sax-500/50 shadow-sm active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             >
               <ShoppingCart className="w-3.5 h-3.5 text-sax-400" />
               <span>Loja Oficial</span>
@@ -1299,7 +1492,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setAuthModalOpen(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-white hover:bg-zinc-100 text-slate-900 text-xs font-extrabold shadow-sm active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl bg-white hover:bg-zinc-100 text-slate-900 text-xs font-extrabold shadow-sm active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <LogIn className="w-3.5 h-3.5" />
                 <span>Entrar</span>
@@ -1309,7 +1502,7 @@ export default function RubsaxWorkspace() {
                 <button
                   type="button"
                   onClick={() => setUserMenuOpen((v) => !v)}
-                  className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-bold text-zinc-100 transition"
+                  className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-bold text-zinc-100 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                 >
                   {authUser.avatar_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -1421,29 +1614,11 @@ export default function RubsaxWorkspace() {
                   if (!ensureCopyrightAccepted()) return;
                   fileInputRef.current?.click();
                 }}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-200 text-xs font-semibold border border-zinc-700 active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed text-zinc-200 text-xs font-semibold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <Upload className="w-3.5 h-3.5 text-sax-400" />
                 <span className="hidden sm:inline">Enviar .mscz / .xml</span>
                 <span className="sm:hidden">Upload</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={isSvgLoading}
-                onClick={handleTriggerPreview}
-                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                  hasUnrenderedChanges
-                    ? 'bg-emerald-500 hover:bg-emerald-400 text-studio-950 border-emerald-400 shadow-lg shadow-emerald-500/20'
-                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
-                }`}
-              >
-                {isProcessing ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-sax-400" />
-                ) : (
-                  <RefreshCw className="w-3.5 h-3.5" />
-                )}
-                <span>Aplicar Alterações</span>
               </button>
 
               <button
@@ -1455,7 +1630,7 @@ export default function RubsaxWorkspace() {
                     ? 'Modo Prévia: desbloqueie a partitura para exportar em PDF'
                     : 'Exportar PDF fiel pelo MuseScore 3'
                 }
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 active:scale-95 transition-transform duration-75 touch-manipulation"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 disabled:opacity-50 disabled:cursor-not-allowed text-studio-950 text-xs sm:text-sm font-extrabold shadow-lg shadow-sax-500/20 select-none active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 {isExportingPdf ? (
                   <>
@@ -1561,7 +1736,7 @@ export default function RubsaxWorkspace() {
                     <button
                       type="button"
                       onClick={handleGoEditor}
-                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold transition shrink-0"
+                      className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation shrink-0"
                     >
                       Voltar para esta partitura
                     </button>
@@ -1630,7 +1805,7 @@ export default function RubsaxWorkspace() {
                     if (!ensureCopyrightAccepted()) return;
                     fileInputRef.current?.click();
                   }}
-                  className={`inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl font-extrabold text-sm shadow-xl active:scale-95 transition-transform duration-75 touch-manipulation ${
+                  className={`inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                     copyrightAccepted
                       ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
                       : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600 shadow-none'
@@ -1698,7 +1873,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setMobileTab('transpose')}
-                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   mobileTab === 'transpose'
                     ? 'border-sax-500 text-sax-400 bg-sax-500/5'
                     : 'border-transparent text-zinc-400'
@@ -1710,49 +1885,61 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setMobileTab('display')}
-                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   mobileTab === 'display'
                     ? 'border-sax-500 text-sax-400 bg-sax-500/5'
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Eye className="w-3.5 h-3.5" />
+                <span className="inline-flex items-center gap-0.5">
+                  <Eye className="w-3.5 h-3.5" />
+                  {areProDrawersLocked && <Lock className="w-2.5 h-2.5 text-sax-400" />}
+                </span>
                 <span>Cifras</span>
               </button>
               <button
                 type="button"
                 onClick={() => setMobileTab('headers')}
-                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   mobileTab === 'headers'
                     ? 'border-sax-500 text-sax-400 bg-sax-500/5'
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Type className="w-3.5 h-3.5" />
+                <span className="inline-flex items-center gap-0.5">
+                  <Type className="w-3.5 h-3.5" />
+                  {areProDrawersLocked && <Lock className="w-2.5 h-2.5 text-sax-400" />}
+                </span>
                 <span>Textos</span>
               </button>
               <button
                 type="button"
                 onClick={() => setMobileTab('layout')}
-                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   mobileTab === 'layout'
                     ? 'border-sax-500 text-sax-400 bg-sax-500/5'
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <SplitSquareVertical className="w-3.5 h-3.5" />
+                <span className="inline-flex items-center gap-0.5">
+                  <SplitSquareVertical className="w-3.5 h-3.5" />
+                  {areProDrawersLocked && <Lock className="w-2.5 h-2.5 text-sax-400" />}
+                </span>
                 <span>Sistema</span>
               </button>
               <button
                 type="button"
                 onClick={() => setMobileTab('staves')}
-                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 transition ${
+                className={`py-2.5 flex flex-col items-center gap-1 border-b-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                   mobileTab === 'staves'
                     ? 'border-sax-500 text-sax-400 bg-sax-500/5'
                     : 'border-transparent text-zinc-400'
                 }`}
               >
-                <Layers className="w-3.5 h-3.5" />
+                <span className="inline-flex items-center gap-0.5">
+                  <Layers className="w-3.5 h-3.5" />
+                  {areProDrawersLocked && <Lock className="w-2.5 h-2.5 text-sax-400" />}
+                </span>
                 <span>Pautas</span>
               </button>
             </div>
@@ -1790,7 +1977,7 @@ export default function RubsaxWorkspace() {
                     if (!ensureCopyrightAccepted()) return;
                     fileInputRef.current?.click();
                   }}
-                  className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold active:scale-95 transition-transform duration-75 touch-manipulation"
+                  className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                 >
                   <Upload className="w-4 h-4 text-sax-400" />
                   <span>
@@ -1815,35 +2002,16 @@ export default function RubsaxWorkspace() {
                   mobileTab === 'transpose' ? 'block' : 'hidden lg:block'
                 } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-3.5`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <Sliders className="w-4 h-4" />
                     <span>Transposição &amp; Oitava</span>
                   </h2>
-                  {semitoneShift !== 0 || octaveShift !== 0 ? (
-                    <button
-                      type="button"
-                      disabled={isSvgLoading}
-                      onClick={() => {
-                        if (isSvgLoading) return;
-                        scheduleScoreAction('transpose-reset', 45);
-                        setSemitoneShift(0);
-                        setOctaveShift(0);
-                      }}
-                      className="inline-flex items-center gap-1 text-[11px] text-sax-400 hover:text-sax-300 disabled:opacity-45 font-semibold active:scale-95 transition-transform duration-75 touch-manipulation"
-                    >
-                      {isProcessing && activeActionId === 'transpose-reset' ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <RotateCcw className="w-3 h-3" />
-                      )}
-                      <span>Resetar Original</span>
-                    </button>
-                  ) : (
-                    <span className="text-[11px] text-emerald-400 font-medium">
-                      Tom Original
-                    </span>
-                  )}
+                  {renderDrawerCornerAction({
+                    modified: isTransposeModified,
+                    actionId: 'transpose-reset',
+                    onReset: handleResetTranspose,
+                  })}
                 </div>
 
                 {/* Seletor Direto de Tonalidade */}
@@ -1864,7 +2032,7 @@ export default function RubsaxWorkspace() {
                           key={dir.id}
                           type="button"
                           onClick={() => setTransposeDirection(dir.id)}
-                          className={`px-1.5 py-0.5 rounded active:scale-95 transition-transform duration-75 touch-manipulation ${
+                          className={`px-1.5 py-0.5 rounded active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                             transposeDirection === dir.id
                               ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
                               : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
@@ -1918,7 +2086,7 @@ export default function RubsaxWorkspace() {
                         scheduleScoreAction('semitone-down', 320);
                         setSemitoneShift((s) => Math.max(-12, s - 1));
                       }}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
                         (isProcessing && activeActionId === 'semitone-down') ||
                         semitoneShift < 0
                           ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
@@ -1941,7 +2109,7 @@ export default function RubsaxWorkspace() {
                         scheduleScoreAction('semitone-up', 320);
                         setSemitoneShift((s) => Math.min(12, s + 1));
                       }}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
                         (isProcessing && activeActionId === 'semitone-up') ||
                         semitoneShift > 0
                           ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
@@ -1958,11 +2126,11 @@ export default function RubsaxWorkspace() {
                   </div>
                 </div>
 
-                {/* Botões de Oitava */}
+                {/* Botões de Oitava (estritamente limitados entre -2 e +2 oitavas) */}
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center justify-between text-xs gap-1">
                     <span className="text-zinc-300 font-semibold">
-                      Deslocamento de Oitava (±12 st):
+                      Oitava (±12 st • máx. ±2):
                     </span>
                     <span className="font-mono text-xs px-2 py-0.5 rounded bg-zinc-800 text-sky-300">
                       {octaveShift > 0 ? `+${octaveShift}` : octaveShift} 8va (
@@ -1978,7 +2146,7 @@ export default function RubsaxWorkspace() {
                         scheduleScoreAction('octave-down', 320);
                         setOctaveShift((o) => Math.max(-2, o - 1));
                       }}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-40 disabled:cursor-not-allowed ${
                         (isProcessing && activeActionId === 'octave-down') ||
                         octaveShift < 0
                           ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
@@ -2001,7 +2169,7 @@ export default function RubsaxWorkspace() {
                         scheduleScoreAction('octave-up', 320);
                         setOctaveShift((o) => Math.min(2, o + 1));
                       }}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-40 disabled:cursor-not-allowed ${
                         (isProcessing && activeActionId === 'octave-up') ||
                         octaveShift > 0
                           ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
@@ -2018,26 +2186,8 @@ export default function RubsaxWorkspace() {
                   </div>
                 </div>
 
-                {/* Dupla Ação Direta: Aplicar Alterações ou Exportar PDF */}
-                <div className="pt-2 border-t border-zinc-800/80 grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={isSvgLoading}
-                    onClick={handleTriggerPreview}
-                    className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                      hasUnrenderedChanges
-                        ? 'bg-emerald-500 hover:bg-emerald-400 text-studio-950 border-emerald-400 shadow-md'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
-                    }`}
-                  >
-                    {isProcessing ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-sax-400" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    <span>Aplicar Alterações</span>
-                  </button>
-
+                {/* Ação Direta: Baixar PDF */}
+                <div className="pt-2 border-t border-zinc-800/80">
                   <button
                     type="button"
                     disabled={isExportingPdf}
@@ -2047,16 +2197,24 @@ export default function RubsaxWorkspace() {
                         ? 'Desbloqueie para baixar PDF fiel'
                         : 'Baixar PDF fiel'
                     }
-                    className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-40 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md active:scale-95 transition-transform duration-75 touch-manipulation"
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-sax-500 hover:bg-sax-400 disabled:opacity-50 disabled:cursor-not-allowed text-studio-950 text-xs font-extrabold shadow-md select-none active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   >
                     {isExportingPdf ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Gerando PDF...</span>
+                      </>
                     ) : isPreviewLocked ? (
-                      <Lock className="w-3.5 h-3.5" />
+                      <>
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>Baixar PDF</span>
+                      </>
                     ) : (
-                      <FileDown className="w-3.5 h-3.5" />
+                      <>
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>Baixar PDF</span>
+                      </>
                     )}
-                    <span>Baixar PDF</span>
                   </button>
                 </div>
               </section>
@@ -2067,13 +2225,46 @@ export default function RubsaxWorkspace() {
                   mobileTab === 'display' ? 'block' : 'hidden lg:block'
                 } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-3`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <Eye className="w-4 h-4" />
                     <span>Cifras, Letras &amp; Pauta</span>
                   </h2>
+                  {renderDrawerCornerAction({
+                    proLocked: areProDrawersLocked,
+                    modified: isChordsModified,
+                    actionId: 'chords-drawer-reset',
+                    onReset: handleResetChords,
+                  })}
                 </div>
 
+                {areProDrawersLocked && (
+                  <button
+                    type="button"
+                    onClick={() => openPlansModal('pro')}
+                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
+                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                      <span>{LOCKED_PRO_BANNER_TEXT}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
+                      PRO
+                    </span>
+                  </button>
+                )}
+
+                <div
+                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
+                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
+                >
+                <div
+                  className={
+                    areProDrawersLocked
+                      ? 'space-y-3 opacity-40 pointer-events-none select-none'
+                      : 'space-y-3'
+                  }
+                >
                 {/* Toggles de Visibilidade de Cifras e Letras/Textos de Pauta */}
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -2084,7 +2275,7 @@ export default function RubsaxWorkspace() {
                       scheduleScoreAction('toggle-chords', 40);
                       setShowChords((v) => !v);
                     }}
-                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       showChords
                         ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                         : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800'
@@ -2118,7 +2309,7 @@ export default function RubsaxWorkspace() {
                       setShowLyrics((v) => !v);
                     }}
                     title="Ocultar/mostrar letras cantadas e textos de pauta (mantém cabeçalho e textos de sistema)"
-                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       showLyrics
                         ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                         : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800'
@@ -2158,13 +2349,6 @@ export default function RubsaxWorkspace() {
                           <span className="font-bold text-sax-300">
                             Afinação das Cifras Visíveis ({activePartLabelInTopBar}):
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => setShowBbEbModal(true)}
-                            className="text-[11px] underline text-zinc-400 hover:text-zinc-200"
-                          >
-                            Abrir Aviso
-                          </button>
                         </div>
                         <div className="grid grid-cols-2 gap-1.5 text-[11px]">
                           <button
@@ -2175,7 +2359,7 @@ export default function RubsaxWorkspace() {
                               scheduleScoreAction('chords-concert', 40);
                               setConvertBbEbChordsToWritten(false);
                             }}
-                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                               !convertBbEbChordsToWritten
                                 ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
@@ -2194,7 +2378,7 @@ export default function RubsaxWorkspace() {
                               scheduleScoreAction('chords-written', 40);
                               setConvertBbEbChordsToWritten(true);
                             }}
-                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                               convertBbEbChordsToWritten
                                 ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
@@ -2262,7 +2446,7 @@ export default function RubsaxWorkspace() {
                                     setEditingChordKey(item.original);
                                     setEditingChordValue(item.current);
                                   }}
-                                  className={`px-2 py-1 rounded-lg font-mono text-xs font-bold border active:scale-95 transition-transform duration-75 touch-manipulation ${
+                                  className={`px-2 py-1 rounded-lg font-mono text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                                     isSelected
                                       ? 'bg-sax-500 text-studio-950 border-sax-300 shadow-sm'
                                       : isModified
@@ -2348,14 +2532,14 @@ export default function RubsaxWorkspace() {
                                   }));
                                   setEditingChordKey(null);
                                 }}
-                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold active:scale-95 transition-transform duration-75"
+                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75"
                               >
                                 Aplicar
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setEditingChordKey(null)}
-                                className="px-2 py-1.5 rounded-lg bg-zinc-800 text-zinc-400 text-xs"
+                                className="px-2 py-1.5 rounded-lg bg-zinc-800 text-zinc-400 text-xs active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                               >
                                 ✕
                               </button>
@@ -2366,6 +2550,8 @@ export default function RubsaxWorkspace() {
                     )}
                   </div>
                 )}
+                </div>
+                </div>
               </section>
 
               {/* 3B. GAVETA EXCLUSIVA DE TEXTOS & CABEÇALHO (SEMPRE ABERTA NO MOBILE E DESKTOP) */}
@@ -2379,10 +2565,42 @@ export default function RubsaxWorkspace() {
                     <Type className="w-4 h-4" />
                     <span>Cabeçalho &amp; Textos Flutuantes</span>
                   </h2>
+                  {renderDrawerCornerAction({
+                    proLocked: areProDrawersLocked,
+                    modified: isHeadersModified,
+                    actionId: 'headers-drawer-reset',
+                    onReset: handleResetHeaders,
+                  })}
                 </div>
 
+                {areProDrawersLocked && (
+                  <button
+                    type="button"
+                    onClick={() => openPlansModal('pro')}
+                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
+                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                      <span>{LOCKED_PRO_BANNER_TEXT}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
+                      PRO
+                    </span>
+                  </button>
+                )}
+
+                <div
+                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
+                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
+                >
                 {/* Controles de Cabeçalho & Caixa de Texto Flutuante */}
-                <div className="space-y-2.5">
+                <div
+                  className={
+                    areProDrawersLocked
+                      ? 'space-y-2.5 opacity-40 pointer-events-none select-none'
+                      : 'space-y-2.5'
+                  }
+                >
                   <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
@@ -2413,7 +2631,7 @@ export default function RubsaxWorkspace() {
                   <button
                     type="button"
                     onClick={handleAddFloatingText}
-                    className="w-full py-2 px-3 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation"
+                    className="w-full py-2 px-3 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   >
                     <Plus className="w-4 h-4" />
                     <span>+ Adicionar Texto Flutuante</span>
@@ -2844,6 +3062,7 @@ export default function RubsaxWorkspace() {
                     </div>
                   </div>
                 </div>
+                </div>
               </section>
 
               {/* 4. NOVO PAINEL: TAMANHO DA PAUTA (ESCALA VETORIAL <Spatium>) */}
@@ -2857,15 +3076,50 @@ export default function RubsaxWorkspace() {
                     <Scaling className="w-4 h-4" />
                     <span>Tamanho da Pauta (Escala)</span>
                   </h2>
-                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-sax-500/15 text-sax-300 border border-sax-500/30 font-bold">
-                    {staffScalePercent}% (
-                    {(((analysis?.originalSpatium || 1.75) * staffScalePercent) / 100).toFixed(2)} mm)
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-sax-500/15 text-sax-300 border border-sax-500/30 font-bold">
+                      {staffScalePercent}%
+                    </span>
+                    {renderDrawerCornerAction({
+                      proLocked: areProDrawersLocked,
+                      modified: isScaleModified,
+                      actionId: 'scale-drawer-reset',
+                      onReset: handleResetScale,
+                    })}
+                  </div>
                 </div>
 
+                {areProDrawersLocked && (
+                  <button
+                    type="button"
+                    onClick={() => openPlansModal('pro')}
+                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
+                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                      <span>{LOCKED_PRO_BANNER_TEXT}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
+                      PRO
+                    </span>
+                  </button>
+                )}
+
+                <div
+                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
+                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
+                >
+                <div
+                  className={
+                    areProDrawersLocked
+                      ? 'space-y-3 opacity-40 pointer-events-none select-none'
+                      : 'space-y-3'
+                  }
+                >
                 <p className="text-[11px] text-zinc-400">
                   Reduza ou amplie a escala das pautas para encaixar linhas órfãs sem diminuir os
-                  textos do cabeçalho.
+                  textos do cabeçalho (
+                  {(((analysis?.originalSpatium || 1.75) * staffScalePercent) / 100).toFixed(2)} mm).
                 </p>
 
                 <div className="grid grid-cols-3 gap-1.5">
@@ -2875,7 +3129,7 @@ export default function RubsaxWorkspace() {
                     onClick={() =>
                       handleChangeStaffScale(staffScalePercent - 5, 'scale-down', 320)
                     }
-                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       isProcessing && activeActionId === 'scale-down'
                         ? 'bg-[#D97706] text-studio-950 border-sax-400'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
@@ -2891,7 +3145,7 @@ export default function RubsaxWorkspace() {
                     type="button"
                     disabled={isSvgLoading}
                     onClick={() => handleChangeStaffScale(100, 'scale-reset', 40)}
-                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       staffScalePercent === 100
                         ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
@@ -2909,7 +3163,7 @@ export default function RubsaxWorkspace() {
                     onClick={() =>
                       handleChangeStaffScale(staffScalePercent + 5, 'scale-up', 320)
                     }
-                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`py-2 px-2 rounded-xl text-xs font-bold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       isProcessing && activeActionId === 'scale-up'
                         ? 'bg-[#D97706] text-studio-950 border-sax-400'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
@@ -2934,7 +3188,7 @@ export default function RubsaxWorkspace() {
                         type="button"
                         disabled={isSvgLoading}
                         onClick={() => handleChangeStaffScale(pct, actionId, 40)}
-                        className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border inline-flex items-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                        className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border inline-flex items-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                           isSelected
                             ? 'bg-[#D97706] text-studio-950 border-sax-400 shadow-sm'
                             : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
@@ -2945,6 +3199,8 @@ export default function RubsaxWorkspace() {
                       </button>
                     );
                   })}
+                </div>
+                </div>
                 </div>
               </section>
 
@@ -2959,19 +3215,59 @@ export default function RubsaxWorkspace() {
                     <SplitSquareVertical className="w-4 h-4" />
                     <span>Quebra de Compasso (Sistema)</span>
                   </h2>
-                  <span className="text-[11px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
-                    {lineBreakMeasures.length === 0
-                      ? 'Automático'
-                      : `${lineBreakMeasures.length} quebras`}
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                      {accessLevel === 'free_pass' || lineBreakMeasures.length === 0
+                        ? 'Automático'
+                        : `${lineBreakMeasures.length} quebras`}
+                    </span>
+                    {renderDrawerCornerAction({
+                      proLocked: areProDrawersLocked,
+                      modified: isBreaksModified,
+                      actionId: 'breaks-drawer-reset',
+                      onReset: handleResetBreaks,
+                    })}
+                  </div>
                 </div>
+
+                {areProDrawersLocked && (
+                  <button
+                    type="button"
+                    onClick={() => openPlansModal('pro')}
+                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
+                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                      <span>
+                        {accessLevel === 'free_pass'
+                          ? 'No Modo Gratuito a quebra de compasso é automática • PRO libera controle manual'
+                          : LOCKED_PRO_BANNER_TEXT}
+                      </span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
+                      PRO
+                    </span>
+                  </button>
+                )}
+
+                <div
+                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
+                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
+                >
+                <div
+                  className={
+                    areProDrawersLocked
+                      ? 'space-y-3 opacity-40 pointer-events-none select-none'
+                      : 'space-y-3'
+                  }
+                >
 
                 {/* Opção 1 — Automático (Remover todas as quebras) */}
                 <button
                   type="button"
                   disabled={isSvgLoading}
                   onClick={handleAutoSystemBreaks}
-                  className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                  className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                     systemBreakMode === 'auto' && lineBreakMeasures.length === 0
                       ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                       : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
@@ -3008,7 +3304,7 @@ export default function RubsaxWorkspace() {
                     type="button"
                     disabled={isSvgLoading}
                     onClick={handleApplyEveryXMeasures}
-                    className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                       systemBreakMode === 'every-x'
                         ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
@@ -3040,7 +3336,7 @@ export default function RubsaxWorkspace() {
                             type="button"
                             disabled={isSvgLoading}
                             onClick={() => handleToggleMeasureBreak(mNum)}
-                            className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                            className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                               hasBreak
                                 ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                                 : 'bg-studio-950 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
@@ -3062,6 +3358,8 @@ export default function RubsaxWorkspace() {
                     </div>
                   </div>
                 )}
+                </div>
+                </div>
               </section>
 
               {/* 6. PAUTAS INTERNAS (.MSCZ) — SEM O AVISO INFERIOR DE RODAPÉ BLINDADO */}
@@ -3070,15 +3368,51 @@ export default function RubsaxWorkspace() {
                   mobileTab === 'staves' ? 'block' : 'hidden lg:block'
                 } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-2.5 text-xs`}
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <Layers className="w-3.5 h-3.5" />
                     <span>Pautas Internas (.MSCZ)</span>
                   </span>
-                  <span className="text-[11px] text-zinc-400">
-                    {analysis?.measureCount || 0} compassos
-                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-[10px] text-zinc-400">
+                      {analysis?.measureCount || 0} comp.
+                    </span>
+                    {renderDrawerCornerAction({
+                      proLocked: areProDrawersLocked,
+                      modified: isStavesModified,
+                      actionId: 'staves-drawer-reset',
+                      onReset: handleResetStaves,
+                    })}
+                  </div>
                 </div>
+
+                {areProDrawersLocked && (
+                  <button
+                    type="button"
+                    onClick={() => openPlansModal('pro')}
+                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
+                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                      <span>{LOCKED_PRO_BANNER_TEXT}</span>
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
+                      PRO
+                    </span>
+                  </button>
+                )}
+
+                <div
+                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
+                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
+                >
+                <div
+                  className={
+                    areProDrawersLocked
+                      ? 'space-y-2.5 opacity-40 pointer-events-none select-none'
+                      : 'space-y-2.5'
+                  }
+                >
 
                 <p className="text-[11px] text-zinc-400">
                   Marque quais pautas deseja manter ativas simultaneamente na tela e no PDF (ou
@@ -3140,7 +3474,7 @@ export default function RubsaxWorkspace() {
                           type="button"
                           disabled={isSvgLoading}
                           onClick={() => handleSelectSingleStaff(st.staffId)}
-                          className={`text-[10px] px-2 py-1 rounded-md font-bold shrink-0 inline-flex items-center gap-1 active:scale-95 transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                          className={`text-[10px] px-2 py-1 rounded-md font-bold shrink-0 inline-flex items-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
                             isIsolatedOnly
                               ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
                               : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
@@ -3190,6 +3524,8 @@ export default function RubsaxWorkspace() {
                       </span>
                     </button>
                   )}
+                </div>
+                </div>
                 </div>
               </section>
               </div>
@@ -3272,7 +3608,7 @@ export default function RubsaxWorkspace() {
                       if (!ensureCopyrightAccepted()) return;
                       fileInputRef.current?.click();
                     }}
-                    className={`inline-flex items-center gap-2 px-6 py-3 rounded-2xl font-extrabold text-sm shadow-xl active:scale-95 transition-transform duration-75 touch-manipulation ${
+                    className={`inline-flex items-center gap-2 px-6 py-3 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                       copyrightAccepted
                         ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
                         : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600'
@@ -3290,6 +3626,8 @@ export default function RubsaxWorkspace() {
                 }
                 originalBase64={originalBase64}
                 fileName={analysis.fileName}
+                semitoneShift={semitoneShift}
+                octaveShift={octaveShift}
                 canvasTheme={canvasTheme}
                 onThemeChange={setCanvasTheme}
                 viewMode={viewMode}
@@ -3297,13 +3635,23 @@ export default function RubsaxWorkspace() {
                 floatingTexts={floatingTexts}
                 onUpdateFloatingTextPosition={handleUpdateFloatingTextPosition}
                 renderVersion={renderVersion}
-                hasUnrenderedChanges={hasUnrenderedChanges}
                 onRequestPreview={handleTriggerPreview}
                 onLoadingChange={setIsSvgLoading}
                 activeActionId={activeActionId}
                 loadingReason={loadingReason}
                 ctaButtonText={appSettings.paywall.cta_button_text}
-                onOpenPlansModal={() => setPlansModalOpen(true)}
+                accessLevel={accessLevel}
+                freePassSettings={appSettings.free_pass}
+                freePassStatus={freePassStatus}
+                isAuthenticated={Boolean(authUser)}
+                isClaimingFreePass={isClaimingFreePass}
+                freePassError={freePassError}
+                onRequireLoginForFreePass={() => setAuthModalOpen(true)}
+                onClaimFreePass={() => void handleClaimFreePass()}
+                onFreePassExpired={() =>
+                  void refreshAuthAndSettings(fileHash, 'if-access-changed')
+                }
+                onOpenPlansModal={(reason) => openPlansModal(reason || 'default')}
                 onPreviewStateChange={setViewerPreviewState}
               />
             )}
@@ -3348,7 +3696,7 @@ export default function RubsaxWorkspace() {
                   setUserMenuOpen(false);
                   setAccountModalOpen(true);
                 }}
-                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-zinc-800 text-zinc-100 font-bold flex items-center gap-2.5"
+                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-zinc-800 text-zinc-100 font-bold flex items-center gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <User className="w-4 h-4 text-sax-400" />
                 <span>Minha Conta</span>
@@ -3356,7 +3704,7 @@ export default function RubsaxWorkspace() {
               <Link
                 href="/conta"
                 onClick={() => setUserMenuOpen(false)}
-                className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2.5"
+                className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <Crown className="w-4 h-4 text-sax-400" />
                 <span>Meu Plano &amp; Músicas Avulsas</span>
@@ -3365,7 +3713,7 @@ export default function RubsaxWorkspace() {
                 <Link
                   href="/admin"
                   onClick={() => setUserMenuOpen(false)}
-                  className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-sax-300 font-extrabold flex items-center gap-2.5"
+                  className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-sax-300 font-extrabold flex items-center gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
                 >
                   <Shield className="w-4 h-4 text-sax-400" />
                   <span>Painel /admin</span>
@@ -3374,7 +3722,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => void handleSignOut()}
-                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-red-950/40 text-red-300 font-bold border-t border-zinc-800 mt-1"
+                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-red-950/40 text-red-300 font-bold border-t border-zinc-800 mt-1 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 Sair da Conta
               </button>
@@ -3390,11 +3738,12 @@ export default function RubsaxWorkspace() {
           setAuthModalOpen(false);
           setPendingPlanIntent(null);
         }}
+        googleNextPath={workspaceView === 'editor' ? '/?view=editor' : '/'}
         onAuthenticated={(u) => {
           setAuthUser(u);
           void refreshAuthAndSettings(fileHash, 'if-access-changed');
           if (pendingPlanIntent) {
-            setPlansModalOpen(true);
+            openPlansModal('pro');
           }
         }}
       />
@@ -3404,6 +3753,7 @@ export default function RubsaxWorkspace() {
         onClose={() => {
           setPlansModalOpen(false);
           setPendingPlanIntent(null);
+          setPlansModalReason('default');
         }}
         user={authUser}
         pricing={appSettings.pricing}
@@ -3411,6 +3761,16 @@ export default function RubsaxWorkspace() {
         fileHash={fileHash}
         fileName={analysis?.fileName}
         initialPlanToStart={pendingPlanIntent}
+        freePassSettings={appSettings.free_pass}
+        freePassStatus={freePassStatus}
+        isClaimingFreePass={isClaimingFreePass}
+        freePassError={freePassError}
+        modalContextReason={plansModalReason}
+        onClaimFreePass={() => void handleClaimFreePass()}
+        onRequireLoginForFreePass={() => setAuthModalOpen(true)}
+        onFreePassExpired={() =>
+          void refreshAuthAndSettings(fileHash, 'if-access-changed')
+        }
         onRequireLogin={(pendingPlan) => {
           setPendingPlanIntent(pendingPlan || null);
           setAuthModalOpen(true);
@@ -3428,6 +3788,15 @@ export default function RubsaxWorkspace() {
         isDev={isDev}
         activeSubscription={activeSubscription}
         activeSingleUnlocks={activeSingleUnlocks}
+        freePassSettings={appSettings.free_pass}
+        freePassStatus={freePassStatus}
+        onOpenPlans={() => {
+          setAccountModalOpen(false);
+          openPlansModal('pro');
+        }}
+        onFreePassExpired={() =>
+          void refreshAuthAndSettings(fileHash, 'if-access-changed')
+        }
         onSignOut={handleSignOut}
         onAccountDeleted={() => {
           setAccountModalOpen(false);
@@ -3437,6 +3806,8 @@ export default function RubsaxWorkspace() {
           setAccessLevel('preview');
           setActiveSubscription(null);
           setActiveSingleUnlocks([]);
+          setFreePassStatus(null);
+          setFreePassError(null);
           if (analysis) {
             setLoadingReason('logout');
             setRenderVersion((v) => v + 1);
@@ -3448,7 +3819,7 @@ export default function RubsaxWorkspace() {
         onRenewMonthlyPix={() => {
           setAccountModalOpen(false);
           setPendingPlanIntent('monthly_pix');
-          setPlansModalOpen(true);
+          openPlansModal('pro');
         }}
       />
 
@@ -3457,27 +3828,6 @@ export default function RubsaxWorkspace() {
         onClose={() => setTutorialModalOpen(false)}
         title={appSettings.tutorial.title || 'Como usar o Rubsax Transposer'}
         videoId={tutorialVideoId}
-      />
-
-      {/* MODAL OBRIGATÓRIO DE AVISO DE CIFRAS PARA INSTRUMENTOS EM SIB (Bb) E MIB (Eb) */}
-      <BbEbChordModal
-        open={showBbEbModal}
-        instrument={activeInstrument}
-        instrumentDisplayName={activePartLabelInTopBar}
-        concertTonality={currentConcertTonality}
-        writtenTonality={currentWrittenTonality}
-        sampleChords={analysis?.sampleChords || []}
-        onConfirmConvertToInstrument={() => {
-          if (!convertBbEbChordsToWritten) {
-            scheduleScoreAction('chords-written', 30);
-            setConvertBbEbChordsToWritten(true);
-          }
-          setShowBbEbModal(false);
-        }}
-        onKeepPianoConcertPitch={() => {
-          setConvertBbEbChordsToWritten(false);
-          setShowBbEbModal(false);
-        }}
       />
 
       {/* OVERLAY CENTRALIZADO E GRANDE: GERANDO PDF */}
@@ -3500,7 +3850,7 @@ export default function RubsaxWorkspace() {
         </div>
       )}
 
-      {/* MODAL CENTRALIZADO DE AVISO: ALTERAÇÕES AINDA NÃO APLICADAS ANTES DE EXPORTAR PDF */}
+      {/* MODAL CENTRALIZADO DE CONFERÊNCIA: PROCESSAMENTO EM ANDAMENTO ANTES DE EXPORTAR PDF */}
       {showUnappliedChangesModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
           <div className="w-full max-w-lg rounded-2xl bg-studio-900 border-2 border-sax-500/50 shadow-2xl overflow-hidden text-zinc-100">
@@ -3513,15 +3863,15 @@ export default function RubsaxWorkspace() {
                   Conferência Antes do Download
                 </span>
                 <h3 className="text-base sm:text-lg font-extrabold text-white">
-                  Alterações Ainda Não Aplicadas
+                  Atualização Visual em Andamento
                 </h3>
               </div>
             </div>
 
             <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-2">
               <p>
-                Você fez alterações nos controles que ainda não terminaram de ser aplicadas na
-                visualização da partitura. O que deseja fazer?
+                A visualização na tela ainda está finalizando a última alteração automática. Deseja
+                aguardar na tela ou gerar o PDF imediatamente?
               </p>
             </div>
 
@@ -3529,32 +3879,20 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setShowUnappliedChangesModal(false)}
-                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 transition"
+                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
-                Cancelar
+                Aguardar na Tela
               </button>
               <button
                 type="button"
                 onClick={() => {
                   setShowUnappliedChangesModal(false);
-                  handleTriggerPreview();
-                }}
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs font-extrabold transition"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Aplicar Alterações na Tela</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowUnappliedChangesModal(false);
-                  handleTriggerPreview();
                   void executeExportPdf();
                 }}
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 transition"
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <FileDown className="w-3.5 h-3.5" />
-                <span>Aplicar e Gerar PDF Agora</span>
+                <span>Gerar PDF Agora</span>
               </button>
             </div>
           </div>

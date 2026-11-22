@@ -1,8 +1,11 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import type { FreePassStatus } from '@/lib/access';
+import { DEFAULT_APP_SETTINGS, type FreePassSettings } from '@/lib/settings';
 import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import type { ClientAuthUser } from '@/lib/supabase/client';
+import FreePassCountdown from './FreePassCountdown';
 import {
   AlertTriangle,
   Ban,
@@ -13,6 +16,7 @@ import {
   LogOut,
   QrCode,
   ShieldAlert,
+  Sparkles,
   Trash2,
   User,
   X,
@@ -25,6 +29,10 @@ interface AccountModalProps {
   isDev: boolean;
   activeSubscription: SubscriptionRow | null;
   activeSingleUnlocks: SingleUnlockRow[];
+  freePassSettings?: FreePassSettings;
+  freePassStatus?: FreePassStatus | null;
+  onOpenPlans?: () => void;
+  onFreePassExpired?: () => void;
   onSignOut: () => Promise<void>;
   onAccountDeleted: () => void;
   onSubscriptionUpdated?: () => void;
@@ -46,11 +54,16 @@ export function AccountPanelContent({
   isDev,
   activeSubscription,
   activeSingleUnlocks,
+  freePassSettings,
+  freePassStatus,
+  onOpenPlans,
+  onFreePassExpired,
   onSignOut,
   onAccountDeleted,
   onSubscriptionUpdated,
   onRenewMonthlyPix,
 }: Omit<AccountModalProps, 'open' | 'onClose'>) {
+  const effectiveFreePass = freePassSettings || DEFAULT_APP_SETTINGS.free_pass;
   const [confirmCancelSub, setConfirmCancelSub] = useState<boolean>(false);
   const [cancellingSub, setCancellingSub] = useState<boolean>(false);
   const [cancelMsg, setCancelMsg] = useState<string | null>(null);
@@ -281,6 +294,67 @@ export function AccountPanelContent({
         </div>
       )}
 
+      {/* Modo Gratuito (Passe por Conta) */}
+      {!isDev && !activeSubscription && effectiveFreePass.enabled && (
+        <div className="p-4 rounded-2xl bg-studio-950 border border-emerald-500/35 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider text-emerald-400">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Modo Gratuito (Passe por Conta)</span>
+            </span>
+            <span className="text-[11px] text-zinc-400">
+              1 música / {effectiveFreePass.cooldown_days} dias • {effectiveFreePass.unlock_hours}h
+            </span>
+          </div>
+
+          {!user.email_confirmed_at ? (
+            <p className="text-xs text-amber-200 font-semibold">
+              Confirme seu e-mail para liberar o Passe Gratuito (ou entre com uma conta Google).
+            </p>
+          ) : freePassStatus?.activeUnlock &&
+            new Date(freePassStatus.activeUnlock.expiresAt).getTime() > Date.now() ? (
+            <div className="p-3 rounded-xl bg-emerald-950/35 border border-emerald-500/35 space-y-1.5 text-xs">
+              <p className="text-zinc-200 font-semibold truncate">
+                Música ativa:{' '}
+                <strong className="text-white">
+                  {freePassStatus.activeUnlock.fileName ||
+                    `Arquivo ${freePassStatus.activeUnlock.fileHash.slice(0, 8)}...`}
+                </strong>
+              </p>
+              <FreePassCountdown
+                targetIso={freePassStatus.activeUnlock.expiresAt}
+                mode="active"
+                onExpire={onFreePassExpired}
+                className="text-emerald-300"
+              />
+            </div>
+          ) : freePassStatus?.state === 'cooldown' && freePassStatus.cooldownUntil ? (
+            <div className="p-3 rounded-xl bg-zinc-900 border border-amber-500/30 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+              <FreePassCountdown
+                targetIso={freePassStatus.cooldownUntil}
+                mode="cooldown"
+                onExpire={onFreePassExpired}
+                className="text-amber-300"
+              />
+              {onOpenPlans && (
+                <button
+                  type="button"
+                  onClick={onOpenPlans}
+                  className="px-3 py-1.5 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                >
+                  Desbloquear agora (PRO)
+                </button>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-emerald-300 font-semibold">
+              Seu Passe Gratuito está disponível! Envie uma partitura no editor e clique em
+              &ldquo;Usar meu Passe Gratuito nesta música&rdquo;.
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Exclusão de Conta (LGPD) com Confirmação Dupla */}
       <div className="p-4 rounded-2xl bg-red-950/25 border border-red-500/30 space-y-3">
         <div className="flex items-center gap-2 text-red-300 font-bold text-xs">
@@ -413,6 +487,10 @@ export default function AccountModal(props: AccountModalProps) {
             isDev={props.isDev}
             activeSubscription={props.activeSubscription}
             activeSingleUnlocks={props.activeSingleUnlocks}
+            freePassSettings={props.freePassSettings}
+            freePassStatus={props.freePassStatus}
+            onOpenPlans={props.onOpenPlans}
+            onFreePassExpired={props.onFreePassExpired}
             onSignOut={props.onSignOut}
             onAccountDeleted={props.onAccountDeleted}
             onSubscriptionUpdated={props.onSubscriptionUpdated}

@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { checkUserAccess } from '@/lib/access';
+import { resolveUserAccessSnapshot } from '@/lib/access';
 import { checkFairUseLimit } from '@/lib/fair-use';
 import {
   ScoreTransformOptions,
@@ -10,8 +10,9 @@ import {
   unpackScoreBuffer,
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
+import { applyFreePassPdfWatermark } from '@/lib/pdf-watermark';
+import { buildFreePassRestrictedMsczBuffer } from '@/lib/server/free-pass-transform';
 import { runMuseScoreHeadlessPdf } from '@/lib/server/musescore-cli';
-import { getAppSettings } from '@/lib/settings';
 import { logUsage } from '@/lib/supabase/admin';
 import { getServerSessionUser } from '@/lib/supabase/server';
 
@@ -29,12 +30,16 @@ export async function POST(req: NextRequest) {
     let optionsObj: ScoreTransformOptions | undefined;
     let modifiedMscxText: string | undefined;
     let customPdfName: string | undefined;
+    let semitoneShift: number | undefined;
+    let octaveShift: number | undefined;
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       const file = formData.get('file') as File | null;
       optionsJson = formData.get('options') as string | null;
       const modifiedMscxField = formData.get('modifiedMscx') as string | null;
+      const semiField = formData.get('semitoneShift') as string | null;
+      const octField = formData.get('octaveShift') as string | null;
 
       if (!file) {
         return NextResponse.json(
@@ -52,6 +57,8 @@ export async function POST(req: NextRequest) {
       const arrayBuf = await file.arrayBuffer();
       rawBuffer = Buffer.from(arrayBuf);
       modifiedMscxText = modifiedMscxField || undefined;
+      if (semiField !== null) semitoneShift = Number(semiField) || 0;
+      if (octField !== null) octaveShift = Number(octField) || 0;
     } else {
       const body = await req.json();
       const parsed = body as {
@@ -60,6 +67,8 @@ export async function POST(req: NextRequest) {
         modifiedMscx?: string;
         options?: ScoreTransformOptions;
         customPdfName?: string;
+        semitoneShift?: number;
+        octaveShift?: number;
       };
 
       if (!parsed.originalBase64) {
@@ -79,6 +88,8 @@ export async function POST(req: NextRequest) {
       modifiedMscxText = parsed.modifiedMscx;
       optionsObj = parsed.options;
       customPdfName = parsed.customPdfName;
+      semitoneShift = parsed.semitoneShift;
+      octaveShift = parsed.octaveShift;
     }
 
     const resolvedFileHash = crypto
@@ -86,12 +97,11 @@ export async function POST(req: NextRequest) {
       .update(rawBuffer)
       .digest('hex');
 
-    const [user, settings] = await Promise.all([
-      getServerSessionUser(),
-      getAppSettings(),
-    ]);
-
-    const access = await checkUserAccess(user, resolvedFileHash);
+    const user = await getServerSessionUser();
+    const { access, settings } = await resolveUserAccessSnapshot(
+      user,
+      resolvedFileHash
+    );
 
     if (settings.operations.maintenance_mode && !access.isDev) {
       return NextResponse.json(
@@ -124,8 +134,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (modifiedMscxText) {
+    if (access.level === 'free_pass') {
+      // Enforcement estrito no servidor para Passe Gratuito: somente transposição + oitava + quebra automática
+      const built = await buildFreePassRestrictedMsczBuffer({
+        rawBuffer,
+        fileName: uploadFileName,
+        fileHash: resolvedFileHash,
+        semitoneShift: semitoneShift ?? optionsObj?.semitoneShift,
+        octaveShift: octaveShift ?? optionsObj?.octaveShift,
+        isDev: access.isDev,
+      });
+      msczBuffer = built.msczBuffer;
+      const cleanTitle = (built.analysis.headers.title.text || 'Partitura')
+        .replace(/[<>:"/\\|?*]+/g, '')
+        .trim();
+      exportFileName = `${cleanTitle} - ${built.transformed.activeStaff.displayName} (${built.transformed.writtenTonality.majorName}) - Rubsax.pdf`;
+    } else if (modifiedMscxText) {
       msczBuffer = await buildModifiedMsczBuffer(rawBuffer, uploadFileName, modifiedMscxText);
+      if (customPdfName) {
+        exportFileName = customPdfName;
+      }
     } else if (optionsJson || optionsObj) {
       const opts = optionsObj || (JSON.parse(optionsJson!) as ScoreTransformOptions);
       const unpacked = await unpackScoreBuffer(rawBuffer, uploadFileName);
@@ -149,18 +177,30 @@ export async function POST(req: NextRequest) {
           .replace(/[<>:"/\\|?*]+/g, '')
           .trim();
         exportFileName = `${cleanTitle} - ${transformed.targetInstrument.name} (${transformed.writtenTonality.majorName}) - Rubsax.pdf`;
+      } else {
+        exportFileName = customPdfName;
       }
     } else {
       msczBuffer = rawBuffer;
+      if (customPdfName) {
+        exportFileName = customPdfName;
+      }
     }
 
-    if (customPdfName) {
-      exportFileName = customPdfName;
-    }
-
-    const pdfBuffer = await runMuseScoreHeadlessPdf(msczBuffer, {
+    let pdfBuffer = await runMuseScoreHeadlessPdf(msczBuffer, {
       isDev: access.isDev,
     });
+
+    // Rodapé sutil no PDF EXCLUSIVAMENTE para exportações em free_pass
+    if (
+      access.level === 'free_pass' &&
+      settings.free_pass.pdf_watermark_enabled
+    ) {
+      pdfBuffer = await applyFreePassPdfWatermark(
+        pdfBuffer,
+        settings.free_pass.pdf_watermark_text
+      );
+    }
 
     void logUsage({
       userId: user?.id || null,

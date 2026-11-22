@@ -99,6 +99,7 @@ export interface ScoreAnalysis {
   needsBbEbChordPrompt: boolean;
   headers: ScoreHeadersState;
   staves: StaffSummary[];
+  hiddenDuplicateStaffIds: string[];
   watermarkText: string;
   originalSpatium: number;
   initialLineBreakMeasures: number[];
@@ -306,6 +307,88 @@ function updateMscxTextPreservingFontTags(
   }
 
   textEl.appendChild(doc.createTextNode(newPlainText));
+}
+
+function normalizeStaffMetaText(val: string): string {
+  return (val || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function shouldHideDuplicateSecondStaff(
+  detectedGroupId: InstrumentGroupId,
+  secondStaff: StaffSummary,
+  extraMeta?: {
+    rawTrackName: string;
+    rawInstrTrackName: string;
+    rawLongName: string;
+    rawInstrumentTagId: string;
+    rawInstrumentAttrId: string;
+  }
+): boolean {
+  const instrIdNorm = normalizeStaffMetaText(
+    `${secondStaff.instrumentId} ${extraMeta?.rawInstrumentTagId || ''} ${
+      extraMeta?.rawInstrumentAttrId || ''
+    }`
+  );
+  const combinedNamesNorm = normalizeStaffMetaText(
+    [
+      secondStaff.trackName,
+      secondStaff.displayName,
+      extraMeta?.rawTrackName || '',
+      extraMeta?.rawInstrTrackName || '',
+      extraMeta?.rawLongName || '',
+    ].join(' ')
+  );
+
+  // Nunca remover instrumentos de base/contracanto (Oboé, Piano, Baixo, Cello, Metais, etc.)
+  const isProtectedBaseInstrument =
+    instrIdNorm.includes('oboe') ||
+    /\boboe\b/.test(combinedNamesNorm) ||
+    instrIdNorm.includes('piano') ||
+    instrIdNorm.includes('keyboard') ||
+    instrIdNorm.includes('bass') ||
+    instrIdNorm.includes('cello') ||
+    instrIdNorm.includes('violoncello') ||
+    instrIdNorm.includes('viola') ||
+    instrIdNorm.includes('clarinet') ||
+    instrIdNorm.includes('trumpet') ||
+    instrIdNorm.includes('trombone') ||
+    instrIdNorm.includes('horn') ||
+    instrIdNorm.includes('bassoon') ||
+    (instrIdNorm.includes('flute') && !/\bflauta\s*doce\b/.test(combinedNamesNorm)) ||
+    /\b(piano|teclado|baixo|contrabaixo|bass|cello|violoncelo|viola|bateria|drums?|guitar|violao|orgao|organ|harpa|harp|trompete|trumpet|trombone|trompa|tuba|fagote|bassoon|clarinete|clarinet|flauta\s*transversal)\b/.test(
+      combinedNamesNorm
+    );
+
+  if (isProtectedBaseInstrument) {
+    return false;
+  }
+
+  // Arquivos para grupo Sib: remover 2ª pauta somente se for Sax Tenor
+  if (detectedGroupId === 'BB_TREBLE') {
+    const isTenorById =
+      instrIdNorm.includes('saxophone.tenor') ||
+      instrIdNorm.includes('tenor-sax') ||
+      instrIdNorm.includes('tenor-saxophone');
+    const isTenorByName =
+      /\bsax(ofone)?\s*tenor\b|\btenor\s*sax(ophone)?\b/.test(combinedNamesNorm);
+    return isTenorById || isTenorByName;
+  }
+
+  // Arquivos para grupo Dó: remover 2ª pauta somente se for Violino ou Flauta Doce
+  if (detectedGroupId === 'C_TREBLE') {
+    const isViolin =
+      /\bstrings\.violin\b/.test(instrIdNorm) ||
+      /\bviolin(o)?\b/.test(combinedNamesNorm);
+    const isRecorder =
+      instrIdNorm.includes('recorder') ||
+      /\bflauta\s*doce\b|\brecorder\b/.test(combinedNamesNorm);
+    return isViolin || isRecorder;
+  }
+
+  return false;
 }
 
 function detectPercussionPart(partEl: Element, trackName: string, instrumentId: string): boolean {
@@ -839,8 +922,14 @@ export function analyzeScoreXml(
         if (styleName === 'title' && !titleText) titleText = val;
         else if (styleName === 'subtitle' && !subtitleText) subtitleText = val;
         else if (styleName === 'composer' && !composerText) composerText = val;
-        else if ((styleName === 'lyricist' || styleName === 'poet') && !lyricistText)
+        else if (
+          (styleName === 'lyricist' ||
+            styleName === 'poet' ||
+            /tom\s*(para|p\/)?\s*piano/i.test(val)) &&
+          !lyricistText
+        ) {
           lyricistText = val;
+        }
       }
     }
   }
@@ -861,6 +950,13 @@ export function analyzeScoreXml(
   }
 
   const stavesSummary: StaffSummary[] = [];
+  const staffInspectMeta: Array<{
+    rawTrackName: string;
+    rawInstrTrackName: string;
+    rawLongName: string;
+    rawInstrumentTagId: string;
+    rawInstrumentAttrId: string;
+  }> = [];
   let mainStaffId = '1';
   let origTransposeChromatic = 0;
   let origTransposeDiatonic = 0;
@@ -873,9 +969,9 @@ export function analyzeScoreXml(
     const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
     const longName = instrEl ? cleanMscxTextNode(getFirstDirectChildByTag(instrEl, 'longName')) : '';
     const instrTrackName = instrEl ? getDirectChildText(instrEl, 'trackName') : '';
-    const instrId = instrEl
-      ? getDirectChildText(instrEl, 'instrumentId') || instrEl.getAttribute('id') || ''
-      : '';
+    const instrTagId = instrEl ? getDirectChildText(instrEl, 'instrumentId') : '';
+    const instrAttrId = instrEl ? instrEl.getAttribute('id') || '' : '';
+    const instrId = instrTagId || instrAttrId;
     const tChrom = instrEl
       ? parseInt(getDirectChildText(instrEl, 'transposeChromatic', '0'), 10) || 0
       : 0;
@@ -921,6 +1017,13 @@ export function analyzeScoreXml(
         fifthsOffset,
         writtenSemitoneOffset,
         clef,
+      });
+      staffInspectMeta.push({
+        rawTrackName: trackName,
+        rawInstrTrackName: instrTrackName,
+        rawLongName: longName,
+        rawInstrumentTagId: instrTagId,
+        rawInstrumentAttrId: instrAttrId,
       });
     });
   });
@@ -992,6 +1095,22 @@ export function analyzeScoreXml(
 
   const concertTonality = getTonalityByFifths(concertKeyFifths);
   const writtenTonality = getTonalityByFifths(writtenKeyFifths);
+
+  // Filtro cirúrgico na 2ª pauta (índice 1) para variações de oitava melódica sem afetar base/Oboé
+  const hiddenDuplicateStaffIds: string[] = [];
+  if (stavesSummary.length >= 2 && stavesSummary[1] && !stavesSummary[1].isPercussion) {
+    if (
+      shouldHideDuplicateSecondStaff(
+        detectedInstrument.groupId,
+        stavesSummary[1],
+        staffInspectMeta[1]
+      )
+    ) {
+      hiddenDuplicateStaffIds.push(stavesSummary[1].staffId);
+    }
+  }
+  const hiddenSet = new Set(hiddenDuplicateStaffIds);
+  const visibleStavesSummary = stavesSummary.filter((s) => !hiddenSet.has(s.staffId));
 
   const styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
   const rawSpatium = styleEl
@@ -1116,7 +1235,8 @@ export function analyzeScoreXml(
         autoSyncPianoKey: true,
       },
     },
-    staves: stavesSummary,
+    staves: visibleStavesSummary,
+    hiddenDuplicateStaffIds,
     watermarkText: 'Rubsax Partituras',
     originalSpatium,
     initialLineBreakMeasures,
@@ -1147,12 +1267,19 @@ export function transformScoreXml(
   const viewMode: ScoreLayoutViewMode = options.viewMode || 'portrait';
   const isFullScore = viewMode === 'full-score';
 
-  // Determinar conjunto de pautas ativas (Grade Completa = todas, ou seleção múltipla personalizada)
-  const rawSelectedIds = isFullScore
-    ? analysis.staves.map((s) => s.staffId)
-    : options.selectedStaffIds && options.selectedStaffIds.length > 0
-    ? options.selectedStaffIds
-    : [options.selectedStaffId || analysis.staves[0]?.staffId || '1'];
+  // Determinar conjunto de pautas ativas (Grade Completa = todas não ocultas, ou seleção múltipla personalizada)
+  const hiddenIdsSet = new Set(analysis.hiddenDuplicateStaffIds || []);
+  const rawSelectedIds = (
+    isFullScore
+      ? analysis.staves.map((s) => s.staffId)
+      : options.selectedStaffIds && options.selectedStaffIds.length > 0
+      ? options.selectedStaffIds
+      : [options.selectedStaffId || analysis.staves[0]?.staffId || '1']
+  ).filter((id) => !hiddenIdsSet.has(id));
+
+  if (rawSelectedIds.length === 0 && analysis.staves[0]) {
+    rawSelectedIds.push(analysis.staves[0].staffId);
+  }
 
   const activeStaffIdsSet = new Set(rawSelectedIds);
   const activeStavesList = analysis.staves.filter((s) =>
@@ -1296,30 +1423,33 @@ export function transformScoreXml(
     }
   });
 
-  // 5. Garantir que o <VBox> de cabeçalho esteja na primeira pauta visível ativa
+  // 5. Garantir que o <VBox> de cabeçalho esteja sempre atualizado na pauta 1 (<Staff id="1">),
+  // pois o MuseScore 3 renderiza os frames de cabeçalho a partir dela mesmo ao isolar pautas internas.
   const staffBodies = getDirectChildrenByTag(scoreEl, 'Staff');
   const firstStaffBody = staffBodies[0];
-  const activeStaffBody =
-    staffBodies.find((s) => (s.getAttribute('id') || '1') === activeStaff.staffId) ||
-    firstStaffBody;
 
-  const targetVBoxOwner = isFullScore ? firstStaffBody : activeStaffBody;
-  if (firstStaffBody && targetVBoxOwner && targetVBoxOwner !== firstStaffBody) {
-    const origVBoxes = getDirectChildrenByTag(firstStaffBody, 'VBox');
-    const targetVBoxes = getDirectChildrenByTag(targetVBoxOwner, 'VBox');
-    if (origVBoxes.length > 0 && targetVBoxes.length === 0) {
-      const clonedVBox = origVBoxes[0].cloneNode(true) as Element;
-      const firstMeasure = getFirstDirectChildByTag(targetVBoxOwner, 'Measure');
-      if (firstMeasure) {
-        targetVBoxOwner.insertBefore(clonedVBox, firstMeasure);
-      } else {
-        targetVBoxOwner.appendChild(clonedVBox);
+  if (firstStaffBody && getDirectChildrenByTag(firstStaffBody, 'VBox').length === 0) {
+    for (let i = 1; i < staffBodies.length; i++) {
+      const secVBoxes = getDirectChildrenByTag(staffBodies[i], 'VBox');
+      if (secVBoxes.length > 0) {
+        const cloned = secVBoxes[0].cloneNode(true) as Element;
+        const firstMeasure = getFirstDirectChildByTag(firstStaffBody, 'Measure');
+        if (firstMeasure) {
+          firstStaffBody.insertBefore(cloned, firstMeasure);
+        } else {
+          firstStaffBody.appendChild(cloned);
+        }
+        break;
       }
     }
   }
 
-  // Atualizar cabeçalhos e injetar Caixas de Texto Flutuantes no VBox da pauta visível
-  if (targetVBoxOwner) {
+  for (let i = 1; i < staffBodies.length; i++) {
+    removeDirectChildrenByTag(staffBodies[i], 'VBox');
+  }
+
+  // Atualizar cabeçalhos e injetar Caixas de Texto Flutuantes no VBox principal
+  if (firstStaffBody) {
     const allStavesSelected =
       analysis.staves.length > 1 &&
       activeStavesList.length === analysis.staves.length;
@@ -1333,7 +1463,7 @@ export function transformScoreXml(
 
     updateStaffHeadersAndFloatingTexts(
       doc,
-      targetVBoxOwner,
+      firstStaffBody,
       options.headers,
       concertTonality,
       headerLabelForActiveMode,
@@ -1347,7 +1477,8 @@ export function transformScoreXml(
   }
 
   // 6. Processar cada <Staff> dentro de <Score> (Quebras de Sistema, Transposição, Oitava, Cifras e Letras)
-  const manualOctaveSemitones = options.octaveShift * 12;
+  const clampedOctaveShift = Math.max(-2, Math.min(2, Math.round(options.octaveShift || 0)));
+  const manualOctaveSemitones = clampedOctaveShift * 12;
   const previewChords: string[] = [];
   const chordOccurrences: ChordOccurrence[] = [];
   const hasExplicitLineBreaks = options.lineBreakMeasures !== undefined;
@@ -1355,9 +1486,11 @@ export function transformScoreXml(
 
   staffBodies.forEach((staffBody, sIdx) => {
     const sid = staffBody.getAttribute('id') || String(sIdx + 1);
-    const staffMeta =
-      analysis.staves.find((st) => st.staffId === sid) || analysis.staves[sIdx];
-    const isThisStaffActive = activeStaffIdsSet.has(sid);
+    const isHiddenDuplicate = hiddenIdsSet.has(sid);
+    const staffMeta = isHiddenDuplicate
+      ? undefined
+      : analysis.staves.find((st) => st.staffId === sid) || analysis.staves[sIdx];
+    const isThisStaffActive = !isHiddenDuplicate && activeStaffIdsSet.has(sid);
     const isPercussion = staffMeta ? staffMeta.isPercussion : false;
     const staffFifthsOffset = staffMeta ? staffMeta.fifthsOffset : 0;
     const staffWrittenSemitoneOffset = staffMeta ? staffMeta.writtenSemitoneOffset : 0;
@@ -1716,14 +1849,21 @@ function updateStaffHeadersAndFloatingTexts(
         getDirectChildText(tb, 'tid') ||
         ''
       ).toLowerCase();
+      const currentTextVal = cleanMscxTextNode(getFirstDirectChildByTag(tb, 'text'));
 
       let key: 'title' | 'subtitle' | 'composer' | 'lyricist' | null = null;
       if (rawStyle === 'title') key = 'title';
       else if (rawStyle === 'subtitle') key = 'subtitle';
       else if (rawStyle === 'composer') key = 'composer';
-      else if (rawStyle === 'lyricist' || rawStyle === 'poet') key = 'lyricist';
+      else if (
+        rawStyle === 'lyricist' ||
+        rawStyle === 'poet' ||
+        /tom\s*(para|p\/)?\s*piano/i.test(currentTextVal)
+      ) {
+        key = 'lyricist';
+      }
 
-      if (!key) continue;
+      if (!key || handledKeys.has(key)) continue;
       handledKeys.add(key);
       const cfg = fieldMap[key];
 

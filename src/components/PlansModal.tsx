@@ -2,8 +2,15 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import type { PaywallSettings, PricingSettings } from '@/lib/settings';
+import type { FreePassStatus } from '@/lib/access';
+import {
+  DEFAULT_APP_SETTINGS,
+  type FreePassSettings,
+  type PaywallSettings,
+  type PricingSettings,
+} from '@/lib/settings';
 import type { ClientAuthUser } from '@/lib/supabase/client';
+import FreePassCountdown from './FreePassCountdown';
 import {
   AlertCircle,
   ArrowLeft,
@@ -17,7 +24,9 @@ import {
   Loader2,
   Lock,
   LogIn,
+  Maximize2,
   QrCode,
+  Sparkles,
   X,
 } from 'lucide-react';
 
@@ -43,6 +52,14 @@ interface PlansModalProps {
   fileHash?: string;
   fileName?: string;
   initialPlanToStart?: PlanCheckoutKind | null;
+  freePassSettings?: FreePassSettings;
+  freePassStatus?: FreePassStatus | null;
+  isClaimingFreePass?: boolean;
+  freePassError?: string | null;
+  modalContextReason?: 'fullscreen' | 'pro' | 'default';
+  onClaimFreePass?: () => void;
+  onRequireLoginForFreePass?: () => void;
+  onFreePassExpired?: () => void;
   onRequireLogin: (pendingPlan?: PlanCheckoutKind) => void;
   onPaymentApproved?: () => void;
 }
@@ -60,9 +77,18 @@ export default function PlansModal({
   fileHash,
   fileName,
   initialPlanToStart,
+  freePassSettings,
+  freePassStatus,
+  isClaimingFreePass = false,
+  freePassError = null,
+  modalContextReason = 'default',
+  onClaimFreePass,
+  onRequireLoginForFreePass,
+  onFreePassExpired,
   onRequireLogin,
   onPaymentApproved,
 }: PlansModalProps) {
+  const effectiveFreePass = freePassSettings || DEFAULT_APP_SETTINGS.free_pass;
   const [loadingKind, setLoadingKind] = useState<PlanCheckoutKind | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [pixCharge, setPixCharge] = useState<PixChargeState | null>(null);
@@ -313,7 +339,7 @@ export default function PlansModal({
                   <button
                     type="button"
                     onClick={finishApprovedFlow}
-                    className="mt-1 px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs sm:text-sm font-extrabold shadow-md transition"
+                    className="mt-1 px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 text-xs sm:text-sm font-extrabold shadow-md active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   >
                     Ver partitura liberada agora
                   </button>
@@ -362,7 +388,7 @@ export default function PlansModal({
                     <button
                       type="button"
                       onClick={() => void handleCopyPix()}
-                      className={`w-full py-3 px-4 rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition ${
+                      className={`w-full py-3 px-4 rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                         copiedPix
                           ? 'bg-emerald-500 text-studio-950'
                           : 'bg-[#D97706] hover:bg-sax-400 text-studio-950 shadow-md'
@@ -444,6 +470,22 @@ export default function PlansModal({
           ) : (
             /* ETAPA 1: SELEÇÃO DE PLANO */
             <>
+              {modalContextReason === 'fullscreen' && (
+                <div className="p-3.5 rounded-2xl bg-amber-950/50 border border-amber-500/45 flex items-start gap-2.5 text-xs text-amber-100">
+                  <Maximize2 className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-extrabold text-amber-200">
+                      Modo Tela Cheia exclusivo para planos Avulso e Mensal (PRO)
+                    </p>
+                    <p className="text-amber-200/80">
+                      O Modo Gratuito libera apenas Transposição &amp; Oitava e exportação em PDF
+                      com quebra automática. Assine ou libere avulso para usar Tela Cheia e todas as
+                      ferramentas.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {!user && (
                 <div className="p-3.5 rounded-2xl bg-sky-950/40 border border-sky-500/40 flex flex-wrap items-center justify-between gap-3 text-xs">
                   <div className="space-y-0.5">
@@ -461,7 +503,7 @@ export default function PlansModal({
                       onClose();
                       onRequireLogin();
                     }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-900 font-extrabold text-xs shadow hover:bg-zinc-100 transition"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white text-slate-900 font-extrabold text-xs shadow hover:bg-zinc-100 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   >
                     <LogIn className="w-3.5 h-3.5" />
                     <span>Entrar com Google / E-mail</span>
@@ -520,7 +562,7 @@ export default function PlansModal({
                       type="button"
                       disabled={loadingKind !== null || !fileHash}
                       onClick={() => void startCheckout('single')}
-                      className="w-full py-3 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 transition disabled:opacity-50"
+                      className="w-full py-3 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
                     >
                       {loadingKind === 'single' ? (
                         <Loader2 className="w-4 h-4 animate-spin text-sax-400" />
@@ -589,7 +631,7 @@ export default function PlansModal({
                           type="button"
                           disabled={loadingKind !== null}
                           onClick={() => void startCheckout('monthly_card')}
-                          className="w-full py-2.5 px-4 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md transition disabled:opacity-50"
+                          className="w-full py-2.5 px-4 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
                         >
                           {loadingKind === 'monthly_card' ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -606,7 +648,7 @@ export default function PlansModal({
                           type="button"
                           disabled={loadingKind !== null}
                           onClick={() => void startCheckout('monthly_pix')}
-                          className="w-full py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-2 transition disabled:opacity-50"
+                          className="w-full py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-sax-500/40 text-sax-300 text-xs font-bold flex items-center justify-center gap-2 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
                         >
                           {loadingKind === 'monthly_pix' ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -622,6 +664,100 @@ export default function PlansModal({
                   </div>
                 )}
               </div>
+
+              {/* Bloco Explicativo do Modo Gratuito */}
+              {effectiveFreePass.enabled && (
+                <div className="p-4 rounded-2xl bg-emerald-950/25 border border-emerald-500/35 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <h4 className="font-extrabold text-emerald-200">
+                        Modo Gratuito (Passe por Conta — 1 música a cada{' '}
+                        {effectiveFreePass.cooldown_days}{' '}
+                        {effectiveFreePass.cooldown_days === 1 ? 'dia' : 'dias'})
+                      </h4>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300">
+                      Grátis • Login + E-mail confirmado
+                    </span>
+                  </div>
+
+                  <p className="text-zinc-300 leading-relaxed">
+                    Permite liberar <strong>1 partitura por {effectiveFreePass.unlock_hours}h</strong>{' '}
+                    para visualizar todas as páginas e baixar PDF apenas com{' '}
+                    <strong>Transposição &amp; Oitava</strong>, quebra de compasso automática e rodapé
+                    discreto no PDF (sem Tela Cheia nem edição de cifras/cabeçalho/pautas).
+                  </p>
+
+                  {freePassError && (
+                    <p className="p-2.5 rounded-xl bg-red-950/70 border border-red-500/40 text-red-200 font-semibold">
+                      {freePassError}
+                    </p>
+                  )}
+
+                  {!user ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        (onRequireLoginForFreePass || onRequireLogin)();
+                      }}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>Entrar para usar meu Passe Gratuito</span>
+                    </button>
+                  ) : freePassStatus?.state === 'email_unconfirmed' ? (
+                    <p className="text-amber-200 font-semibold">
+                      Confirme seu e-mail para liberar o Passe Gratuito (contas Google já entram
+                      confirmadas).
+                    </p>
+                  ) : freePassStatus?.state === 'active_for_file' &&
+                    freePassStatus.activeUnlock?.expiresAt ? (
+                    <div className="p-2.5 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-200">
+                      <FreePassCountdown
+                        targetIso={freePassStatus.activeUnlock.expiresAt}
+                        mode="active"
+                        onExpire={onFreePassExpired}
+                      />
+                    </div>
+                  ) : freePassStatus?.state === 'cooldown' && freePassStatus.cooldownUntil ? (
+                    <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-amber-500/35 text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                      <FreePassCountdown
+                        targetIso={freePassStatus.cooldownUntil}
+                        mode="cooldown"
+                        onExpire={onFreePassExpired}
+                      />
+                      <span className="text-[11px] text-zinc-400">
+                        Ou desbloqueie imediatamente acima nos planos PRO.
+                      </span>
+                    </div>
+                  ) : fileHash && onClaimFreePass ? (
+                    <button
+                      type="button"
+                      disabled={isClaimingFreePass}
+                      onClick={onClaimFreePass}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-studio-950 font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-60"
+                    >
+                      {isClaimingFreePass ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>
+                        {isClaimingFreePass
+                          ? 'Ativando...'
+                          : 'Usar meu Passe Gratuito nesta música'}
+                      </span>
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-emerald-300 font-bold">
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Passe Gratuito disponível para sua próxima partitura!</span>
+                    </span>
+                  )}
+                </div>
+              )}
             </>
           )}
 

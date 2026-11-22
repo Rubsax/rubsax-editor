@@ -13,6 +13,7 @@ import {
   ExternalLink,
   X,
   FileText,
+  HelpCircle,
 } from 'lucide-react';
 
 interface EcosystemFooterProps {
@@ -87,6 +88,15 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
                     <Info className="w-3.5 h-3.5 text-sax-400 shrink-0" />
                     <span>Sobre Nós (Nossa Missão)</span>
                   </button>
+                </li>
+                <li>
+                  <Link
+                    href="/ajuda"
+                    className="inline-flex items-center gap-2 text-zinc-300 hover:text-sax-300 transition"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                    <span>Guia de Uso &amp; Ajuda (FAQ)</span>
+                  </Link>
                 </li>
                 <li>
                   <Link

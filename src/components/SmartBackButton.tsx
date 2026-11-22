@@ -30,7 +30,11 @@ export default function SmartBackButton({
   };
 
   return (
-    <button type="button" onClick={handleBack} className={className}>
+    <button
+      type="button"
+      onClick={handleBack}
+      className={`${className} active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation`}
+    >
       <ArrowLeft className="w-4 h-4 shrink-0" />
       <span>{label}</span>
     </button>
