@@ -358,9 +358,13 @@ export default function RubsaxWorkspace() {
             savedSession.fileName,
             resolvedFormat
           );
+          const validRestoredStaffIds = new Set(restoredAnalysis.staves.map((s) => s.staffId));
+          const filteredSavedStaffIds = (savedSession.selectedStaffIds || []).filter((id) =>
+            validRestoredStaffIds.has(id)
+          );
           const restoredStaffIds: string[] =
-            savedSession.selectedStaffIds?.length > 0
-              ? savedSession.selectedStaffIds
+            filteredSavedStaffIds.length > 0
+              ? filteredSavedStaffIds
               : [restoredAnalysis.staves[0]?.staffId || '1'];
           const restoredOptions: ScoreTransformOptions = {
             semitoneShift: savedSession.semitoneShift ?? 0,
@@ -1355,7 +1359,7 @@ export default function RubsaxWorkspace() {
             <button
               type="button"
               onClick={() => setAnnouncementDismissed(true)}
-              className="p-1 rounded-lg hover:bg-black/25 text-current shrink-0"
+              className="p-1 rounded-lg hover:bg-black/25 text-current shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               aria-label="Fechar aviso"
             >
               <X className="w-3.5 h-3.5" />
@@ -1382,7 +1386,7 @@ export default function RubsaxWorkspace() {
             type="button"
             onClick={handleGoWelcome}
             title="Ir para a Tela Inicial"
-            className="flex items-center gap-2.5 text-left rounded-xl hover:opacity-90 active:scale-[0.99] transition focus:outline-none"
+            className="flex items-center gap-2.5 text-left rounded-xl hover:opacity-90 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation focus:outline-none"
           >
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sax-400 to-sax-600 p-1 flex items-center justify-center shadow-md shadow-sax-500/20 overflow-hidden shrink-0">
               {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1471,7 +1475,7 @@ export default function RubsaxWorkspace() {
                 <button
                   type="button"
                   onClick={handleToggleDevBadgeHidden}
-                  className="p-1.5 rounded-lg bg-zinc-800/70 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700/70 transition"
+                  className="p-1.5 rounded-lg bg-zinc-800/70 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 border border-zinc-700/70 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   title={
                     devBadgeHidden
                       ? 'Mostrar badge Modo Dev'
@@ -1541,7 +1545,7 @@ export default function RubsaxWorkspace() {
                           setUserMenuOpen(false);
                           setAccountModalOpen(true);
                         }}
-                        className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2"
+                        className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
                       >
                         <User className="w-3.5 h-3.5 text-sax-400" />
                         <span>Minha Conta</span>
@@ -1567,7 +1571,7 @@ export default function RubsaxWorkspace() {
                       <button
                         type="button"
                         onClick={() => void handleSignOut()}
-                        className="w-full px-3.5 py-2 text-left hover:bg-red-950/40 text-red-300 font-semibold border-t border-zinc-800 mt-1"
+                        className="w-full px-3.5 py-2 text-left hover:bg-red-950/40 text-red-300 font-semibold border-t border-zinc-800 mt-1 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
                       >
                         Sair da Conta
                       </button>
@@ -1663,7 +1667,7 @@ export default function RubsaxWorkspace() {
           <button
             type="button"
             onClick={() => setUploadError(null)}
-            className="px-2.5 py-1 rounded-lg bg-red-900/60 hover:bg-red-800 text-xs font-semibold"
+            className="px-2.5 py-1 rounded-lg bg-red-900/60 hover:bg-red-800 text-xs font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
           >
             Fechar
           </button>
@@ -2411,7 +2415,7 @@ export default function RubsaxWorkspace() {
                                 setChordOverrides({});
                                 setEditingChordKey(null);
                               }}
-                              className="text-[10px] text-sax-400 hover:underline disabled:opacity-50"
+                              className="text-[10px] text-sax-400 hover:underline disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                             >
                               Restaurar cifras
                             </button>
@@ -2479,7 +2483,7 @@ export default function RubsaxWorkspace() {
                                     m === 'symbol' ? 'occurrence' : 'symbol'
                                   )
                                 }
-                                className="text-[10px] text-sky-400 hover:underline"
+                                className="text-[10px] text-sky-400 hover:underline active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                               >
                                 {chordEditMode === 'symbol'
                                   ? 'Editar por compasso'
@@ -2532,7 +2536,7 @@ export default function RubsaxWorkspace() {
                                   }));
                                   setEditingChordKey(null);
                                 }}
-                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75"
+                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                               >
                                 Aplicar
                               </button>
@@ -2610,7 +2614,7 @@ export default function RubsaxWorkspace() {
                         scheduleScoreAction('headers-toggle-all', 120);
                         setHeaders((h) => ({ ...h, showAllHeaders: !h.showAllHeaders }));
                       }}
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-200 hover:text-sax-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-200 hover:text-sax-300 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                     >
                       {headers.showAllHeaders ? (
                         <Eye className="w-3.5 h-3.5 text-sax-400" />
@@ -2692,7 +2696,7 @@ export default function RubsaxWorkspace() {
                                   prev.filter((item) => item.id !== ft.id)
                                 )
                               }
-                              className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900"
+                              className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                               title="Remover texto flutuante"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -2771,7 +2775,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50"
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             {headers.title.visible && !headers.title.removed
                               ? 'Ocultar'
@@ -2788,7 +2792,7 @@ export default function RubsaxWorkspace() {
                                 title: { ...h.title, removed: !h.title.removed },
                               }));
                             }}
-                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                             title="Remover Título"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -2831,7 +2835,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50"
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             {headers.subtitle.visible && !headers.subtitle.removed
                               ? 'Ocultar'
@@ -2848,7 +2852,7 @@ export default function RubsaxWorkspace() {
                                 subtitle: { ...h.subtitle, removed: !h.subtitle.removed },
                               }));
                             }}
-                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60 disabled:opacity-50"
+                            className="p-1 rounded bg-red-950/60 text-red-300 hover:bg-red-900/60 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                             title="Remover Subtítulo"
                           >
                             <Trash2 className="w-3 h-3" />
@@ -2898,7 +2902,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 ${
+                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                               headers.composer.autoSyncInstrument
                                 ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
                                 : 'bg-zinc-800 text-zinc-400'
@@ -2922,7 +2926,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50"
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             {headers.composer.visible && !headers.composer.removed
                               ? 'Ocultar'
@@ -2939,7 +2943,7 @@ export default function RubsaxWorkspace() {
                                 composer: { ...h.composer, removed: !h.composer.removed },
                               }));
                             }}
-                            className="p-1 rounded bg-red-950/60 text-red-300 disabled:opacity-50"
+                            className="p-1 rounded bg-red-950/60 text-red-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
@@ -2990,7 +2994,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 ${
+                            className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                               headers.lyricist.autoSyncPianoKey
                                 ? 'bg-sax-500/20 text-sax-300 border border-sax-500/40'
                                 : 'bg-zinc-800 text-zinc-400'
@@ -3014,7 +3018,7 @@ export default function RubsaxWorkspace() {
                                 },
                               }));
                             }}
-                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50"
+                            className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-zinc-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             {headers.lyricist.visible && !headers.lyricist.removed
                               ? 'Ocultar'
@@ -3031,7 +3035,7 @@ export default function RubsaxWorkspace() {
                                 lyricist: { ...h.lyricist, removed: !h.lyricist.removed },
                               }));
                             }}
-                            className="p-1 rounded bg-red-950/60 text-red-300 disabled:opacity-50"
+                            className="p-1 rounded bg-red-950/60 text-red-300 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
@@ -3682,7 +3686,7 @@ export default function RubsaxWorkspace() {
               <button
                 type="button"
                 onClick={() => setUserMenuOpen(false)}
-                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300"
+                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                 aria-label="Fechar menu"
               >
                 <X className="w-4 h-4" />

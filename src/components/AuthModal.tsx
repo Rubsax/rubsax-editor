@@ -145,7 +145,7 @@ export default function AuthModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
+            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             aria-label="Fechar"
           >
             <X className="w-4 h-4" />
@@ -199,7 +199,7 @@ export default function AuthModal({
                 setMode('login');
                 setErrorMsg(null);
               }}
-              className={`py-1.5 rounded-lg transition ${
+              className={`py-1.5 rounded-lg active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                 mode === 'login'
                   ? 'bg-sax-500 text-studio-950'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -213,7 +213,7 @@ export default function AuthModal({
                 setMode('signup');
                 setErrorMsg(null);
               }}
-              className={`py-1.5 rounded-lg transition ${
+              className={`py-1.5 rounded-lg active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                 mode === 'signup'
                   ? 'bg-sax-500 text-studio-950'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -227,7 +227,7 @@ export default function AuthModal({
                 setMode('recover');
                 setErrorMsg(null);
               }}
-              className={`py-1.5 rounded-lg transition ${
+              className={`py-1.5 rounded-lg active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                 mode === 'recover'
                   ? 'bg-sax-500 text-studio-950'
                   : 'text-zinc-400 hover:text-zinc-200'

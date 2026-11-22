@@ -83,7 +83,7 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
                   <button
                     type="button"
                     onClick={() => setAboutModalOpen(true)}
-                    className="inline-flex items-center gap-2 text-zinc-300 hover:text-sax-300 transition text-left"
+                    className="inline-flex items-center gap-2 text-zinc-300 hover:text-sax-300 text-left active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                   >
                     <Info className="w-3.5 h-3.5 text-sax-400 shrink-0" />
                     <span>Sobre Nós (Nossa Missão)</span>
@@ -229,7 +229,7 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
               <button
                 type="button"
                 onClick={() => setAboutModalOpen(false)}
-                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
+                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                 aria-label="Fechar"
               >
                 <X className="w-4 h-4" />
@@ -279,7 +279,7 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
               <button
                 type="button"
                 onClick={() => setAboutModalOpen(false)}
-                className="px-4 py-2 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold transition"
+                className="px-4 py-2 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 Fechar
               </button>

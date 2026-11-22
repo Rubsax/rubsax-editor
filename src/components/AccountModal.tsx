@@ -147,7 +147,7 @@ export function AccountPanelContent({
         <button
           type="button"
           onClick={() => void onSignOut()}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200 border border-zinc-700 shrink-0"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-bold text-zinc-200 border border-zinc-700 shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
         >
           <LogOut className="w-3.5 h-3.5" />
           <span>Sair</span>
@@ -214,7 +214,7 @@ export function AccountPanelContent({
                     <button
                       type="button"
                       onClick={() => setConfirmCancelSub(true)}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-bold transition"
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-200 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                     >
                       <Ban className="w-3.5 h-3.5 text-amber-400" />
                       <span>Cancelar renovação automática</span>
@@ -230,7 +230,7 @@ export function AccountPanelContent({
                           type="button"
                           disabled={cancellingSub}
                           onClick={() => void handleCancelSubscription()}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-studio-950 font-extrabold disabled:opacity-50"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-studio-950 font-extrabold disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                         >
                           {cancellingSub && <Loader2 className="w-3 h-3 animate-spin" />}
                           <span>Confirmar Cancelamento</span>
@@ -239,7 +239,7 @@ export function AccountPanelContent({
                           type="button"
                           disabled={cancellingSub}
                           onClick={() => setConfirmCancelSub(false)}
-                          className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300"
+                          className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                         >
                           Manter Assinatura
                         </button>
@@ -254,7 +254,7 @@ export function AccountPanelContent({
               <button
                 type="button"
                 onClick={onRenewMonthlyPix}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold transition"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <QrCode className="w-3.5 h-3.5" />
                 <span>Renovar por +30 dias via Pix</span>
@@ -372,7 +372,7 @@ export function AccountPanelContent({
           <button
             type="button"
             onClick={() => setConfirmStep(1)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-950 hover:bg-red-900 border border-red-500/40 text-red-200 text-xs font-bold transition"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-950 hover:bg-red-900 border border-red-500/40 text-red-200 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span>Excluir Minha Conta e Dados (LGPD)</span>
@@ -392,14 +392,14 @@ export function AccountPanelContent({
               <button
                 type="button"
                 onClick={() => setConfirmStep(2)}
-                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold"
+                className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 Sim, quero continuar
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmStep(0)}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300"
+                className="px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 Cancelar
               </button>
@@ -417,7 +417,7 @@ export function AccountPanelContent({
                 type="button"
                 disabled={deleting}
                 onClick={() => void handleDeleteAccount()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-extrabold disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-white font-extrabold disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                 <span>Confirmar Exclusão Definitiva</span>
@@ -426,7 +426,7 @@ export function AccountPanelContent({
                 type="button"
                 disabled={deleting}
                 onClick={() => setConfirmStep(0)}
-                className="px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300"
+                className="px-3 py-2 rounded-lg bg-zinc-800 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 Voltar
               </button>
@@ -474,7 +474,7 @@ export default function AccountModal(props: AccountModalProps) {
           <button
             type="button"
             onClick={props.onClose}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
+            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             aria-label="Fechar"
           >
             <X className="w-4 h-4" />

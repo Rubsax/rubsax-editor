@@ -58,7 +58,7 @@ export default function TutorialModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition shrink-0"
+            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             aria-label="Fechar tutorial"
           >
             <X className="w-4 h-4" />
@@ -93,7 +93,7 @@ export default function TutorialModal({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold border border-zinc-700 transition"
+            className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
           >
             Fechar
           </button>
