@@ -39,14 +39,15 @@ interface AccountModalProps {
   onRenewMonthlyPix?: () => void;
 }
 
-function formatCountdown(expiresAtIso: string | null): string {
+function formatCountdown(expiresAtIso: string | null, nowMs: number): string {
   if (!expiresAtIso) return '';
-  const diffMs = new Date(expiresAtIso).getTime() - Date.now();
+  const diffMs = new Date(expiresAtIso).getTime() - nowMs;
   if (diffMs <= 0) return 'Expirado';
-  const totalMinutes = Math.floor(diffMs / 60000);
-  const hours = Math.floor(totalMinutes / 60);
-  const mins = totalMinutes % 60;
-  return `${hours}h ${mins}min restantes`;
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return `${hours}h ${String(mins).padStart(2, '0')}m ${String(secs).padStart(2, '0')}s restantes`;
 }
 
 export function AccountPanelContent({
@@ -72,6 +73,20 @@ export function AccountPanelContent({
   const [confirmStep, setConfirmStep] = useState<0 | 1 | 2>(0);
   const [deleting, setDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const tick = () => setNowMs(Date.now());
+    const id = setInterval(tick, 1000);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   if (!user) return null;
 
@@ -284,9 +299,9 @@ export function AccountPanelContent({
                 <span className="font-semibold text-zinc-200 truncate">
                   {u.file_name || `Arquivo ${u.file_hash.slice(0, 8)}...`}
                 </span>
-                <span className="inline-flex items-center gap-1 text-emerald-400 font-mono font-bold shrink-0">
+                <span className="inline-flex items-center gap-1 text-emerald-400 font-mono font-bold tabular-nums shrink-0">
                   <Clock className="w-3.5 h-3.5" />
-                  {formatCountdown(u.expires_at)}
+                  {formatCountdown(u.expires_at, nowMs)}
                 </span>
               </div>
             ))}
@@ -303,7 +318,9 @@ export function AccountPanelContent({
               <span>Modo Gratuito (Passe por Conta)</span>
             </span>
             <span className="text-[11px] text-zinc-400">
-              1 música / {effectiveFreePass.cooldown_days} dias • {effectiveFreePass.unlock_hours}h
+              1 música grátis a cada {effectiveFreePass.cooldown_days}{' '}
+              {effectiveFreePass.cooldown_days === 1 ? 'dia' : 'dias'} •{' '}
+              {effectiveFreePass.unlock_hours}h para editar e baixar
             </span>
           </div>
 
@@ -312,8 +329,8 @@ export function AccountPanelContent({
               Confirme seu e-mail para liberar o Passe Gratuito (ou entre com uma conta Google).
             </p>
           ) : freePassStatus?.activeUnlock &&
-            new Date(freePassStatus.activeUnlock.expiresAt).getTime() > Date.now() ? (
-            <div className="p-3 rounded-xl bg-emerald-950/35 border border-emerald-500/35 space-y-1.5 text-xs">
+            new Date(freePassStatus.activeUnlock.expiresAt).getTime() > nowMs ? (
+            <div className="p-3 rounded-xl bg-emerald-950/35 border border-emerald-500/35 space-y-2 text-xs">
               <p className="text-zinc-200 font-semibold truncate">
                 Música ativa:{' '}
                 <strong className="text-white">
@@ -327,6 +344,17 @@ export function AccountPanelContent({
                 onExpire={onFreePassExpired}
                 className="text-emerald-300"
               />
+              {freePassStatus.activeUnlock.cooldownUntil &&
+                new Date(freePassStatus.activeUnlock.cooldownUntil).getTime() > nowMs && (
+                  <div className="pt-1 border-t border-emerald-500/20">
+                    <FreePassCountdown
+                      targetIso={freePassStatus.activeUnlock.cooldownUntil}
+                      mode="cooldown"
+                      onExpire={onFreePassExpired}
+                      className="text-amber-300 text-[11px]"
+                    />
+                  </div>
+                )}
             </div>
           ) : freePassStatus?.state === 'cooldown' && freePassStatus.cooldownUntil ? (
             <div className="p-3 rounded-xl bg-zinc-900 border border-amber-500/30 flex flex-wrap items-center justify-between gap-2.5 text-xs">

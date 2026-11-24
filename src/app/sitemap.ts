@@ -10,6 +10,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 1,
     },
     {
+      url: 'https://app.rubsax.com.br/planos',
+      lastModified: now,
+      changeFrequency: 'weekly',
+      priority: 0.9,
+    },
+    {
       url: 'https://app.rubsax.com.br/ajuda',
       lastModified: now,
       changeFrequency: 'weekly',

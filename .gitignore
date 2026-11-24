@@ -19,9 +19,15 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
+# local env files & secrets
 .env
+.env.*
+.env*.local
+*.key
+*.secret
+*[Cc]have*.txt
+*[Tt]oken*.txt
+Fase 2 e 3.txt
 
 # typescript
 *.tsbuildinfo

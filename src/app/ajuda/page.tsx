@@ -4,228 +4,323 @@ import EcosystemFooter from '@/components/EcosystemFooter';
 import HelpAccordion, { HelpFaqItem } from '@/components/HelpAccordion';
 import SmartBackButton from '@/components/SmartBackButton';
 import { getAppSettings } from '@/lib/settings';
-import { Check, HelpCircle, ShieldCheck, Sparkles, Crown, X } from 'lucide-react';
+import {
+  CreditCard,
+  Eye,
+  HelpCircle,
+  Layers,
+  LayoutGrid,
+  ShieldCheck,
+  Sliders,
+  SplitSquareVertical,
+  Type,
+  ExternalLink,
+} from 'lucide-react';
 
 export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
-  title: 'Guia de Uso e Perguntas Frequentes (FAQ) | Rubsax Transposer',
+  title: 'Guia de Uso & Perguntas Frequentes | Rubsax Transposer',
   description:
-    'Aprenda a usar o Rubsax Transposer passo a passo: formatos aceitos, transposição, oitavas, cifras para Piano vs Sib/Mib, pautas internas, Modo Gratuito e planos PRO.',
+    'Guia completo da versão v1.4: menu superior, transposição pelo menor caminho, cifras para qualquer instrumento transpositor, edição dupla com Aplicar, quebras de compasso/página e pautas duplas.',
   alternates: {
     canonical: 'https://app.rubsax.com.br/ajuda',
   },
 };
 
-function formatBRL(val: number): string {
-  return val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-}
-
 export default async function AjudaPage() {
   const settings = await getAppSettings();
-  const { free_pass: freePass, pricing, support_links: supportLinks } = settings;
+  const { free_pass: freePass, support_links: supportLinks } = settings;
 
-  const cooldownLabel = `${freePass.cooldown_days} ${
-    freePass.cooldown_days === 1 ? 'dia' : 'dias'
-  }`;
+  const cooldownDays = freePass.cooldown_days || 7;
+  const cooldownLabel = `${cooldownDays} ${cooldownDays === 1 ? 'dia' : 'dias'}`;
+  const freeHours = freePass.unlock_hours || 24;
 
   const faqItems: HelpFaqItem[] = [
     {
-      id: 'formats-upload',
-      category: '1. Formatos & Envio',
-      question: 'Quais arquivos são aceitos e como enviar uma partitura?',
+      id: 'formats-recent',
+      category: '1. Formatos & Projetos Recentes',
+      question: 'Quais arquivos são aceitos e como funciona a lista de Projetos Recentes?',
       answer: [
-        'O Rubsax Transposer aceita arquivos nativos do MuseScore (.mscz e .mscx) e arquivos MusicXML (.xml, .musicxml e .mxl) exportados de programas como MuseScore 3/4, Finale e Sibelius.',
-        'Para enviar, marque a declaração de direitos autorais (Lei nº 9.610/98) na tela inicial e clique em "Selecionar Arquivo" — ou simplesmente arraste o arquivo para dentro da área tracejada.',
-        'Suas edições e a partitura carregada ficam salvas localmente no navegador (IndexedDB). Se você recarregar a página (F5) ou abrir o login/planos, o sistema retoma exatamente de onde parou sem precisar reenviar o arquivo.',
+        'O Rubsax Transposer aceita arquivos nativos do MuseScore (.mscz e .mscx) e arquivos MusicXML (.xml, .musicxml e .mxl) exportados do MuseScore 3/4, Finale ou Sibelius.',
+        'Ao abrir o site em uma nova aba, a tela de upload inicia limpa para economizar memória no celular. Logo abaixo, a seção "Projetos Recentes (neste dispositivo)" guarda até 5 arquivos salvos no navegador (IndexedDB) com botões "Abrir" e "Excluir" para você retomar sob demanda.',
+        'Se você recarregar a aba (F5) durante uma edição ativa ou fizer login pelo Google no meio do trabalho, sua partitura aberta é restaurada automaticamente sem perder suas edições.',
       ],
     },
     {
-      id: 'transpose-octaves-chords',
-      category: '2. Tom, Oitava & Cifras',
+      id: 'transpose-octave-multi',
+      category: '2. Gaveta 1 — Tom & Oitava',
       question:
-        'Como funcionam a transposição de tom, o limite de oitavas e as cifras (Piano vs. Sib/Mib)?',
+        'Como funciona o seletor "Mudar tonalidade" e por que a Oitava pede 1 instrumento por vez?',
       answer: [
-        'Na 1ª gaveta ("Transposição & Oitava"), você pode escolher diretamente o novo Tom Base (Piano Dó) na lista e definir a direção ("Mais Próximo", "Acima" ou "Abaixo"), ou ajustar com precisão usando os botões "-1 / +1 Semitom".',
-        'O deslocamento de oitava ("-1 / +1 Oitava") é limitado entre -2 e +2 oitavas para manter a leitura musical limpa e evitar excesso de linhas suplementares.',
-        'Ao abrir uma partitura em instrumento transpositor (ex.: Sax Alto Mib ou Trompete/Clarineta Sib), as cifras carregam por padrão no modo "Tom do Piano (Dó)" para facilitar o acompanhamento com teclado/violão. Caso queira ver as cifras convertidas para a leitura escrita do instrumento transpositor, clique em "Converter p/ Sib" ou "Converter p/ Mib" dentro da gaveta "Cifras, Letras & Pauta" (recurso PRO).',
+        'No seletor "Mudar tonalidade", escolha o novo tom desejado e o motor calcula automaticamente a transposição pelo menor caminho (menor distância em semitons). Você também pode ajustar de 1 em 1 semitom usando "-1 Semitom" e "+1 Semitom".',
+        'O deslocamento de oitava (-2 a +2 oitavas) afeta exclusivamente a parte ativa e só é aplicado quando há apenas 1 instrumento visível na tela (um instrumento de Pauta Dupla, como Piano Clave de Sol + Fá, conta como 1 único instrumento). Em Grade Completa ou com 2+ instrumentos marcados, o botão exibe o aviso "Só é possível alterar a oitava com um instrumento por vez.".',
+        'Quando há múltiplos instrumentos ou Grade Completa na tela, o Tom de Referência no topo sempre permanece no Tom Original (Piano / Dó) para evitar ambiguidades entre afinações.',
       ],
     },
     {
-      id: 'staves-headers-layout',
-      category: '3. Pautas, Cabeçalho & Sistema',
+      id: 'chords-universal',
+      category: '3. Gaveta 2 — Cifras & Transpositores',
       question:
-        'Como isolar pautas internas, atualizar o cabeçalho, ajustar escala e quebra de compasso?',
+        'Quais instrumentos transpositores são reconhecidos e como editar cifras com as duas caixas?',
       answer: [
-        'Na gaveta "Pautas Internas (.MSCZ)", você pode marcar várias pautas para visualizar juntas, clicar em "Só esta" para isolar apenas uma parte (ex.: Base, Flauta ou Sax Alto) ou ativar a "Grade Completa". O filtro inteligente oculta automaticamente pautas duplicadas de variação de oitava melódica (como Sax Tenor no grupo Sib ou Violino/Flauta Doce no grupo Dó), mantendo preservados todos os instrumentos de base e contracanto (como Oboé, Piano e Baixo).',
-        'Na gaveta "Cabeçalho & Textos Flutuantes", você edita Título, Subtítulo, Instrumento e o campo "Tom para Piano" — que se atualiza automaticamente ao mudar o tom tanto na pauta principal quanto em todas as pautas internas. Você também pode adicionar Textos Flutuantes arrastáveis diretamente sobre a folha.',
-        'Em "Tamanho da Pauta (Escala)" você ajusta o espaçamento (<Spatium>) de 70% a 130% sem encolher os títulos, e em "Quebra de Compasso (Sistema)" escolhe modo Automático, quebra a cada X compassos ou por compasso específico. Todas as gavetas possuem o botão "Resetar" no canto superior direito para restaurar apenas aquela seção ao original.',
+        'A detecção agora é universal: o motor lê diretamente os parâmetros reais (<transpose>, transposeChromatic e transposeDiatonic) do arquivo .mscz/.mscx/.xml/.mxl para reconhecer Sib, Mib, Fá, Lá, Ré, Sol e qualquer outra afinação.',
+        'Quando há instrumento transpositor isolado na tela, você pode alternar entre "Tom Original (Piano)" e "Tom Escrito (<Afinação>)". Se houver mistura de instrumentos de afinações diferentes na Grade, a troca global é bloqueada com aviso e a referência permanece no Tom Original (Piano).',
+        'Ao clicar em qualquer cifra da lista (recurso PRO), abrem-se as duas caixas simultaneamente: em cima "Editar todas iguais" (altera todas as ocorrências da cifra) e embaixo "Editar por compasso" (escolhe o compasso exato). Nenhuma edição altera a partitura até você clicar em "Aplicar".',
       ],
     },
     {
-      id: 'plans-comparison',
-      category: '4. Planos & Modo Gratuito',
-      question: `Qual a diferença entre Visitante, Modo Gratuito (1 música / ${cooldownLabel}), Avulso e Mensal?`,
+      id: 'headers-pending',
+      category: '4. Gaveta 3 — Cabeçalho & Confirmação antes do PDF',
+      question: 'Por que os campos de cabeçalho agora têm botão "Aplicar"?',
       answer: [
-        'Visitante (sem login): permite enviar arquivos e testar apenas a 1ª gaveta (Transposição & Oitava) visualizando a metade superior da Página 1 (prévia). Exportação de PDF e Tela Cheia ficam bloqueadas.',
-        `Modo Gratuito (Passe por Conta logada com e-mail confirmado ou Google): libera ${freePass.unlock_hours}h de acesso completo a todas as páginas e download de PDF para 1 música a cada ${cooldownLabel}. No Modo Gratuito ficam liberadas apenas as ferramentas de Transposição & Oitava, a quebra de compasso é automática, o PDF traz um rodapé discreto do app e o Modo Tela Cheia é exclusivo para pagantes.`,
-        `Plano Avulso (${formatBRL(pricing.single_price_brl)}): pagamento único via Pix que libera TODAS as páginas, todas as gavetas (Cifras, Cabeçalho, Escala, Quebra Manual e Pautas Internas), Modo Tela Cheia e PDF limpo sem marca d'água para aquela música durante ${pricing.single_duration_hours} horas.`,
-        `Assinatura Mensal (${formatBRL(pricing.monthly_price_brl)}/mês): desbloqueia tudo acima de forma ilimitada para qualquer partitura enviada, no Cartão ou Pix (30 dias), sem fidelidade.`,
+        'Na versão v1.4, digitar nos campos de Título, Subtítulo, Instrumento ou Tom para Piano não dispara renderizações pesadas a cada tecla. Enquanto houver texto não aplicado, o campo exibe a marcação "Não aplicado". Basta clicar em "Aplicar" (ou pressionar Enter) para enviar ao MuseScore.',
+        'Se você clicar em "Exportar PDF" com alterações digitadas e ainda não aplicadas (em Textos ou Cifras), o Rubsax exibe uma janela listando exatamente onde há alteração pendente, permitindo clicar em "Aplicar tudo e Exportar PDF" ou "Voltar para revisar".',
       ],
     },
     {
-      id: 'guarantee-cancel-privacy',
-      category: '5. Garantia, Cancelamento & Privacidade',
+      id: 'system-breaks-staves',
+      category: '5. Sistema & Pautas Duplas',
       question:
-        'Como funciona a garantia de 7 dias, o cancelamento em 1 clique e a privacidade dos arquivos?',
+        'O que mudou nas Quebras de Compasso/Página e no agrupamento de Pautas Duplas (Piano)?',
       answer: [
-        'Garantia CDC (Art. 49): você tem 7 dias corridos após a contratação de qualquer plano para solicitar arrependimento e reembolso integral pelo suporte oficial.',
-        'Cancelamento em 1 clique: assinantes no cartão podem cancelar a renovação automática sem burocracia diretamente em "Minha Conta" (/conta), mantendo o acesso ativo até o fim do período já pago.',
-        'Privacidade e Stateless: o Rubsax Transposer não cria acervo público com suas partituras. Os arquivos enviados vão para diretório temporário apenas durante a renderização SVG/PDF no MuseScore 3 e são removidos logo após o processamento. Você pode excluir sua conta e dados pessoais a qualquer momento na área Minha Conta (LGPD).',
+        'Na gaveta Sistema, "Quebra de Compasso" e a nova "Quebra de Página" estão organizadas em subgavetas retráteis (accordion) e agora são liberadas também para Visitante e Modo Gratuito (iniciando em modo Automático, enquanto o Tamanho da Pauta/Escala continua exclusivo PRO).',
+        'Na gaveta Pautas Internas (PRO), descontinuamos o filtro que ocultava a 2ª pauta semelhante, garantindo 100% das partes orquestrais disponíveis. Além disso, pautas entrelaçadas de um mesmo instrumento — como Piano (Clave de Sol + Clave de Fá) — agora aparecem agrupadas como uma única opção ("Piano (Pauta Dupla)") e nunca são separadas.',
+      ],
+    },
+    {
+      id: 'free-pass-plans-support',
+      category: '6. Modo Gratuito, Pautas Ocultas & Suporte',
+      question: `Como funciona o limite do Modo Gratuito (${cooldownLabel}) e o aviso de múltiplos instrumentos?`,
+      answer: [
+        `Com uma conta gratuita conectada, você tem 1 música grátis a cada ${cooldownLabel} com ${freeHours}h para editar e baixar o PDF completo (com rodapé discreto do modo gratuito). Nos modos Visitante e Gratuito, é exibida apenas a 1ª parte (ou o Piano Pauta Dupla completo) e, se o arquivo tiver mais instrumentos, um aviso discreto informa o total de partes disponíveis nos planos PRO.`,
+        `Após usar o passe gratuito, um contador regressivo mostra no painel (/conta) e no topo do editor "Sua partitura volta a ficar grátis em X dias" — mudando automaticamente para horas e minutos nas últimas 24 horas.`,
+        `Confira todos os valores, comparativo detalhado e contratação na página Nossos Planos (/planos). Todos os pagamentos são processados via Mercado Pago com garantia legal de 7 dias.`,
       ],
     },
   ];
 
+  const drawerGuides = [
+    {
+      number: 'Gaveta 1',
+      title: 'Transposição & Oitava',
+      icon: <Sliders className="w-4 h-4 text-sax-400" />,
+      badge: 'Todos os planos',
+      badgeTone: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+      summary:
+        'Use "Mudar tonalidade" para ir direto ao novo tom pela menor distância sem precisar configurar direção, ou ajuste passo a passo em -1 / +1 Semitom. O botão -1 / +1 Oitava (±2) funciona quando apenas 1 instrumento está ativo (Piano Pauta Dupla conta como 1) e altera somente aquela parte.',
+    },
+    {
+      number: 'Gaveta 2',
+      title: 'Cifras, Letras & Pauta',
+      icon: <Eye className="w-4 h-4 text-sax-400" />,
+      badge: 'Recurso PRO',
+      badgeTone: 'bg-sax-500/15 text-sax-300 border-sax-500/35',
+      summary:
+        'Oculte ou exiba a pauta, cifras ou letras/textos internos. Quando houver instrumento transpositor isolado (Sib, Mib, Fá, Lá, Ré, Sol etc.), alterne as cifras entre "Tom Original (Piano)" e "Tom Escrito". Clique em qualquer cifra para editar simultaneamente todas iguais ou por compasso específico e confirme com "Aplicar".',
+    },
+    {
+      number: 'Gaveta 3',
+      title: 'Cabeçalho & Textos Flutuantes',
+      icon: <Type className="w-4 h-4 text-sax-400" />,
+      badge: 'Recurso PRO',
+      badgeTone: 'bg-sax-500/15 text-sax-300 border-sax-500/35',
+      summary:
+        'Crie textos flutuantes arrastáveis sobre a folha ou edite Título, Subtítulo, Instrumento e Tom para Piano. Campos modificados ficam sinalizados como "Não aplicado" até você clicar em "Aplicar" ao lado do campo — evitando lentidão enquanto digita. Caso esqueça, o botão Exportar PDF avisa e permite aplicar tudo de uma vez.',
+    },
+    {
+      number: 'Gaveta 4',
+      title: 'Sistema (Quebras & Escala)',
+      icon: <SplitSquareVertical className="w-4 h-4 text-sky-400" />,
+      badge: 'Quebras liberadas • Escala PRO',
+      badgeTone: 'bg-sky-500/15 text-sky-300 border-sky-500/35',
+      summary:
+        'Expanda "Quebra de Compasso" (automático, a cada X compassos ou grade por compasso) e "Quebra de Página" (selecione ou clique no compasso para forçar nova página), ambas liberadas inclusive no Visitante e Modo Gratuito. Acima delas, "Tamanho da Pauta (Escala)" redimensiona apenas os pentagramas nos planos PRO.',
+    },
+    {
+      number: 'Gaveta 5',
+      title: 'Pautas Internas & Pautas Duplas',
+      icon: <Layers className="w-4 h-4 text-sax-400" />,
+      badge: 'Recurso PRO',
+      badgeTone: 'bg-sax-500/15 text-sax-300 border-sax-500/35',
+      summary:
+        'Todas as partes do arranjo ficam listadas para combinar na tela ou isolar com "Só esta" ou empilhar na "Grade Completa". Instrumentos de pauta dupla como Piano (Clave de Sol + Clave de Fá) já aparecem agrupados em uma única parte para manter mão direita e esquerda sempre juntas.',
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-studio-950 text-zinc-200 flex flex-col">
-      <header className="sticky top-0 z-30 bg-studio-900/95 backdrop-blur-md border-b border-zinc-800 px-4 sm:px-6 py-3">
-        <div className="max-w-4xl mx-auto flex items-center justify-between gap-3">
+    <div className="min-h-screen flex flex-col bg-studio-950 text-zinc-100">
+      {/* Cabeçalho */}
+      <header className="border-b border-zinc-800 bg-studio-900/95 backdrop-blur-md px-4 sm:px-6 py-4 sticky top-0 z-30">
+        <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <SmartBackButton
               currentPath="/ajuda"
-              label="Voltar"
+              label="Voltar ao Editor"
               fallbackHref="/?view=editor"
+              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs sm:text-sm font-bold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             />
-            <span className="text-zinc-700">|</span>
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-sax-500/15 border border-sax-500/40 flex items-center justify-center">
+                <HelpCircle className="w-4 h-4 text-sax-400" />
+              </div>
+              <div>
+                <h1 className="text-sm sm:text-base font-extrabold text-white">
+                  Guia de Uso &amp; Perguntas Frequentes
+                </h1>
+                <p className="text-[11px] text-zinc-400">
+                  Rubsax Transposer v1.4 — Manual rápido do estúdio e FAQ
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
             <Link
-              href="/?view=home"
-              title="Ir para a Tela Inicial"
-              className="inline-flex items-center gap-2 hover:opacity-90 transition"
+              href="/planos"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700"
             >
-              <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-sax-400 to-sax-600 p-0.5 flex items-center justify-center overflow-hidden">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src="/icon.png"
-                  alt="Rubsax Logo"
-                  className="w-full h-full object-contain rounded"
-                />
-              </span>
-              <span className="text-xs font-extrabold tracking-tight text-white hidden sm:inline">
-                RUBSAX <span className="text-sax-400">TRANSPOSER</span>
-              </span>
+              <CreditCard className="w-3.5 h-3.5 text-sax-400" />
+              <span>Nossos Planos</span>
+            </Link>
+            <Link
+              href="/conta"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sax-500/15 hover:bg-sax-500/25 text-sax-300 text-xs font-extrabold border border-sax-500/40"
+            >
+              <span>Minha Conta</span>
             </Link>
           </div>
-          <Link
-            href="/?view=editor"
-            className="px-3 py-1.5 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-          >
-            Abrir Editor
-          </Link>
         </div>
       </header>
 
-      <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10 space-y-8">
-        <div className="space-y-3 border-b border-zinc-800 pb-6">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sax-500/15 border border-sax-500/30 text-sax-300 text-xs font-bold">
-            <HelpCircle className="w-4 h-4" />
-            <span>Central de Ajuda &amp; Guia Rápido</span>
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-            Guia de Uso &amp; Perguntas Frequentes (FAQ)
-          </h1>
-          <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
-            Tire suas dúvidas sobre formatos de partitura, transposição, cifras, pautas internas,
-            Modo Gratuito e planos PRO em poucos segundos.
-          </p>
-        </div>
-
-        {/* Tabela Comparativa Dinâmica: Visitante vs Modo Gratuito vs Avulso vs Mensal */}
-        <section className="space-y-3">
-          <h2 className="text-sm sm:text-base font-extrabold text-white flex items-center gap-2">
-            <Crown className="w-4 h-4 text-sax-400" />
-            <span>Comparativo Rápido dos Modos de Acesso</span>
+      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10 space-y-8">
+        {/* Banner Hero */}
+        <section className="rounded-3xl bg-gradient-to-br from-studio-900 via-studio-900 to-sax-500/10 border border-zinc-800 p-6 sm:p-8 shadow-2xl space-y-3">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-sax-500/15 border border-sax-500/35 text-sax-300 text-[10px] font-bold uppercase tracking-wider">
+            Documentação Oficial v1.4
+          </span>
+          <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+            Domine o Rubsax Transposer em poucos minutos
           </h2>
-          <div className="rounded-2xl bg-studio-900 border border-zinc-800 overflow-x-auto">
-            <table className="w-full text-xs text-left">
-              <thead className="bg-studio-950 text-zinc-400 border-b border-zinc-800">
-                <tr>
-                  <th className="px-4 py-3 font-bold">Recurso</th>
-                  <th className="px-3 py-3 font-bold">Visitante</th>
-                  <th className="px-3 py-3 font-bold text-emerald-300">
-                    Modo Gratuito
-                    <span className="block text-[10px] font-normal text-zinc-400">
-                      1 música / {cooldownLabel} ({freePass.unlock_hours}h)
-                    </span>
-                  </th>
-                  <th className="px-3 py-3 font-bold text-sky-300">
-                    Avulso ({pricing.single_duration_hours}h)
-                    <span className="block text-[10px] font-normal text-zinc-400">
-                      {formatBRL(pricing.single_price_brl)}
-                    </span>
-                  </th>
-                  <th className="px-3 py-3 font-bold text-sax-400">
-                    Mensal PRO
-                    <span className="block text-[10px] font-normal text-zinc-400">
-                      {formatBRL(pricing.monthly_price_brl)}/mês
-                    </span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-800/80 text-zinc-300">
-                <tr>
-                  <td className="px-4 py-2.5 font-semibold">Transposição de Tom &amp; Oitava (±2)</td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-2.5 font-semibold">Todas as páginas + Exportar PDF</td>
-                  <td className="px-3 py-2.5 text-zinc-500">Só 50% Pág. 1</td>
-                  <td className="px-3 py-2.5 text-emerald-300 font-semibold">Com rodapé discreto</td>
-                  <td className="px-3 py-2.5 text-sky-300 font-semibold">PDF limpo (1 música)</td>
-                  <td className="px-3 py-2.5 text-sax-300 font-semibold">PDF limpo ilimitado</td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-2.5 font-semibold">Cifras Sib/Mib, Cabeçalho, Escala &amp; Pautas</td>
-                  <td className="px-3 py-2.5"><X className="w-4 h-4 text-zinc-600" /></td>
-                  <td className="px-3 py-2.5"><X className="w-4 h-4 text-zinc-600" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-2.5 font-semibold">Quebra de Compasso Manual</td>
-                  <td className="px-3 py-2.5 text-zinc-500">—</td>
-                  <td className="px-3 py-2.5 text-zinc-400">Automática</td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-2.5 font-semibold">Modo Tela Cheia</td>
-                  <td className="px-3 py-2.5"><X className="w-4 h-4 text-zinc-600" /></td>
-                  <td className="px-3 py-2.5 text-amber-300 font-semibold">Exclusivo PRO</td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                  <td className="px-3 py-2.5"><Check className="w-4 h-4 text-emerald-400" /></td>
-                </tr>
-              </tbody>
-            </table>
+          <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed max-w-3xl">
+            Consulte o funcionamento do menu superior, de cada uma das 5 gavetas de edição e as
+            respostas para as dúvidas mais comuns sobre transposição, cifras, pautas duplas e
+            exportação em PDF fiel ao MuseScore 3.
+          </p>
+        </section>
+
+        {/* Guia do Menu Superior */}
+        <section className="rounded-3xl bg-studio-900/90 border border-zinc-800 p-5 sm:p-7 space-y-4">
+          <div className="flex items-center gap-2">
+            <LayoutGrid className="w-4 h-4 text-sax-400" />
+            <h2 className="text-base sm:text-lg font-extrabold text-white">
+              Guia do Menu Superior
+            </h2>
           </div>
-          <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-400">
-            <span className="inline-flex items-center gap-1 text-emerald-300 font-semibold">
-              <Sparkles className="w-3.5 h-3.5" />
-              Modo Gratuito requer login com Google ou e-mail confirmado.
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-sax-400" />
-              Garantia de 7 dias (CDC) e cancelamento em 1 clique.
-            </span>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs text-zinc-300">
+            <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
+              <p className="font-bold text-white">Logo &amp; Navegação Rápida</p>
+              <p className="text-zinc-400 leading-relaxed">
+                Clique na marca <strong>Rubsax Transposer</strong> para ir ao início sem perder sua
+                partitura em edição. Ao lado ficam os atalhos para <strong>Tutorial</strong>,{' '}
+                <strong>Planos</strong>, <strong>Ajuda / FAQ</strong>, <strong>Catálogo</strong> e{' '}
+                <strong>Loja Oficial</strong>.
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
+              <p className="font-bold text-white">Visor Central de Tonalidade</p>
+              <p className="text-zinc-400 leading-relaxed">
+                Mostra em tempo real o <strong>Tom Base (Piano)</strong> e o tom da pauta ativa. Com
+                vários instrumentos ou Grade Completa na tela, o visor mantém o{' '}
+                <strong>Tom Original (Piano / Dó)</strong> como referência fixa.
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
+              <p className="font-bold text-white">Enviar Arquivo &amp; Fechar Partitura</p>
+              <p className="text-zinc-400 leading-relaxed">
+                Envie novos arquivos <code className="text-sax-300">.mscz</code>,{' '}
+                <code className="text-sax-300">.mscx</code>,{' '}
+                <code className="text-sax-300">.xml</code> ou{' '}
+                <code className="text-sax-300">.mxl</code> a qualquer momento ou feche a partitura
+                atual na barra lateral para acessar os Projetos Recentes.
+              </p>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
+              <p className="font-bold text-white">Exportar PDF &amp; Minha Conta</p>
+              <p className="text-zinc-400 leading-relaxed">
+                Gera o PDF final via MuseScore 3 e alerta automaticamente se existir alguma edição
+                digitada em Textos ou Cifras sem clicar em <strong>Aplicar</strong>. Em{' '}
+                <strong>Minha Conta</strong> você gerencia seu acesso e plano PRO.
+              </p>
+            </div>
           </div>
+        </section>
+
+        {/* 1 Guia Objetivo por Gaveta */}
+        <section className="space-y-3">
+          <h2 className="text-base sm:text-lg font-extrabold text-white">
+            Guia Objetivo das 5 Gavetas do Editor
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {drawerGuides.map((g) => (
+              <article
+                key={g.number}
+                className="rounded-2xl bg-studio-900/90 border border-zinc-800 p-4 sm:p-5 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    {g.icon}
+                    <h3 className="text-sm font-extrabold text-white">
+                      {g.number}: {g.title}
+                    </h3>
+                  </div>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${g.badgeTone}`}
+                  >
+                    {g.badge}
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-300 leading-relaxed">{g.summary}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        {/* Atalho dedicado para a página /planos */}
+        <section className="rounded-3xl bg-gradient-to-r from-studio-900 to-sax-500/10 border border-sax-500/35 p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <p className="text-xs font-extrabold uppercase tracking-wider text-sax-400">
+              Valores, Modo Gratuito &amp; Mensal PRO
+            </p>
+            <h2 className="text-base sm:text-lg font-extrabold text-white">
+              Quer comparar todos os planos e benefícios?
+            </h2>
+            <p className="text-xs text-zinc-300 flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+              <span>
+                Veja a tabela comparativa completa entre Visitante, Modo Gratuito, Avulso e Mensal
+                PRO.
+              </span>
+            </p>
+          </div>
+          <Link
+            href="/planos"
+            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shrink-0"
+          >
+            <CreditCard className="w-4 h-4" />
+            <span>Ver Nossos Planos</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </Link>
         </section>
 
         {/* Tópicos Expansíveis (Accordion) */}
         <section className="space-y-3">
           <h2 className="text-sm sm:text-base font-extrabold text-white">
-            Perguntas Frequentes por Tópico
+            Perguntas Frequentes por Tópico (FAQ)
           </h2>
           <HelpAccordion items={faqItems} />
         </section>

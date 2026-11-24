@@ -10,21 +10,33 @@ interface FreePassCountdownProps {
   onExpire?: () => void;
 }
 
-function formatRemaining(diffMs: number): string {
-  if (diffMs <= 0) return '0s';
+function formatActiveRemaining(diffMs: number): string {
+  if (diffMs <= 0) return '0m 00s';
   const totalSeconds = Math.floor(diffMs / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
 
-  if (days > 0) {
-    return `${days}d ${hours}h ${minutes}m`;
-  }
-  if (hours >= 1) {
-    return `${hours}h ${minutes}m`;
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
   }
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function formatCooldownMessage(diffMs: number): string {
+  if (diffMs >= 24 * 3600 * 1000) {
+    const days = Math.ceil(diffMs / 86_400_000);
+    return `Sua partitura volta a ficar grátis em ${days} ${days === 1 ? 'dia' : 'dias'}`;
+  }
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours >= 1) {
+    return `Sua partitura volta a ficar grátis em ${hours}h ${String(minutes).padStart(2, '0')}m`;
+  }
+  return `Sua partitura volta a ficar grátis em ${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
 export default function FreePassCountdown({
@@ -35,19 +47,16 @@ export default function FreePassCountdown({
 }: FreePassCountdownProps) {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const expiredFiredRef = useRef<boolean>(false);
+  const onExpireRef = useRef(onExpire);
+
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+  }, [onExpire]);
 
   useEffect(() => {
     expiredFiredRef.current = false;
     setNowMs(Date.now());
-  }, [targetIso]);
 
-  const parsedTargetMs = new Date(targetIso).getTime();
-  const isSubHour =
-    Number.isFinite(parsedTargetMs) &&
-    parsedTargetMs - nowMs > 0 &&
-    parsedTargetMs - nowMs < 3600_000;
-
-  useEffect(() => {
     const targetMs = new Date(targetIso).getTime();
     if (!Number.isFinite(targetMs)) return;
 
@@ -56,31 +65,38 @@ export default function FreePassCountdown({
       setNowMs(current);
       if (targetMs - current <= 0 && !expiredFiredRef.current) {
         expiredFiredRef.current = true;
-        onExpire?.();
+        onExpireRef.current?.();
       }
     };
 
-    const diffMs = targetMs - Date.now();
-    if (diffMs <= 0) {
+    if (targetMs - Date.now() <= 0) {
       if (!expiredFiredRef.current) {
         expiredFiredRef.current = true;
-        onExpire?.();
+        onExpireRef.current?.();
       }
       return;
     }
 
-    // Atualiza a cada segundo na última hora, ou a cada 30s acima de 1h
-    const intervalMs = diffMs < 3600_000 ? 1000 : 30_000;
-    const id = setInterval(tick, intervalMs);
-    return () => clearInterval(id);
-  }, [targetIso, isSubHour, onExpire]);
+    const id = setInterval(tick, 1000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [targetIso]);
 
   const targetMs = new Date(targetIso).getTime();
   const diffMs = Number.isFinite(targetMs) ? Math.max(0, targetMs - nowMs) : 0;
 
   if (diffMs <= 0) {
     return (
-      <span className={`inline-flex items-center gap-1.5 font-mono font-bold ${className}`}>
+      <span className={`inline-flex items-center gap-1.5 font-mono font-bold tabular-nums ${className}`}>
         <Clock className="w-3.5 h-3.5 shrink-0" />
         <span>
           {mode === 'active'
@@ -91,25 +107,23 @@ export default function FreePassCountdown({
     );
   }
 
-  const formatted = formatRemaining(diffMs);
-
   if (mode === 'active') {
     return (
       <span className={`inline-flex items-center gap-1.5 font-semibold ${className}`}>
         <Sparkles className="w-3.5 h-3.5 shrink-0" />
         <span>
-          Passe Gratuito ativo • <strong className="font-mono">{formatted}</strong> restantes
+          Passe Gratuito ativo •{' '}
+          <strong className="font-mono tabular-nums">{formatActiveRemaining(diffMs)}</strong>{' '}
+          restantes
         </span>
       </span>
     );
   }
 
   return (
-    <span className={`inline-flex items-center gap-1.5 font-semibold ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 font-semibold tabular-nums ${className}`}>
       <Clock className="w-3.5 h-3.5 shrink-0" />
-      <span>
-        Próxima transposição gratuita em <strong className="font-mono">{formatted}</strong>
-      </span>
+      <span>{formatCooldownMessage(diffMs)}</span>
     </span>
   );
 }

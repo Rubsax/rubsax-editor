@@ -96,6 +96,7 @@ export default function PlansModal({
   const [paymentStatus, setPaymentStatus] = useState<
     'idle' | 'pending' | 'approved' | 'rejected' | 'expired'
   >('idle');
+  const [pixNowMs, setPixNowMs] = useState<number>(() => Date.now());
 
   const onPaymentApprovedRef = useRef(onPaymentApproved);
   const onCloseRef = useRef(onClose);
@@ -250,6 +251,38 @@ export default function PlansModal({
       clearInterval(intervalId);
     };
   }, [open, pixCharge, paymentStatus]);
+
+  // Contagem regressiva real segundo a segundo do QR Code Pix via expiresAtTimestamp - Date.now()
+  useEffect(() => {
+    if (!open || !pixCharge?.expiresAt || paymentStatus !== 'pending') {
+      return;
+    }
+
+    const expiresAtMs = new Date(pixCharge.expiresAt).getTime();
+    if (!Number.isFinite(expiresAtMs)) return;
+
+    const tick = () => {
+      const now = Date.now();
+      setPixNowMs(now);
+      if (expiresAtMs - now <= 0) {
+        setPaymentStatus((prev) => (prev === 'pending' ? 'expired' : prev));
+      }
+    };
+
+    tick();
+    const intervalId = setInterval(tick, 1000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [open, pixCharge?.expiresAt, paymentStatus]);
 
   // Efeito dedicado ao fechamento automático após aprovação (sem ser cancelado pelo reset do efeito de polling)
   useEffect(() => {
@@ -407,18 +440,43 @@ export default function PlansModal({
                       )}
                     </button>
 
-                    {pixCharge.expiresAt && (
-                      <p className="text-[11px] text-zinc-400 flex items-center gap-1.5">
-                        <Clock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
-                        <span>
-                          Expira em:{' '}
-                          {new Date(pixCharge.expiresAt).toLocaleTimeString('pt-BR', {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </span>
-                      </p>
-                    )}
+                    {pixCharge.expiresAt && (() => {
+                      const expiresAtMs = new Date(pixCharge.expiresAt).getTime();
+                      const diffMs = Number.isFinite(expiresAtMs)
+                        ? Math.max(0, expiresAtMs - pixNowMs)
+                        : 0;
+                      const totalSec = Math.floor(diffMs / 1000);
+                      const mins = Math.floor(totalSec / 60);
+                      const secs = totalSec % 60;
+                      const formattedClock = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+                      const formattedLimit = new Date(pixCharge.expiresAt).toLocaleTimeString(
+                        'pt-BR',
+                        { hour: '2-digit', minute: '2-digit' }
+                      );
+
+                      return (
+                        <div className="p-2.5 rounded-xl bg-studio-950/90 border border-sax-500/35 flex items-center justify-between gap-2 text-xs">
+                          <span className="inline-flex items-center gap-1.5 text-zinc-300 font-semibold">
+                            <Clock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                            <span>
+                              {diffMs > 0 ? 'Expira em:' : 'Código expirado'}
+                            </span>
+                          </span>
+                          <div className="flex items-center gap-1.5 font-mono tabular-nums">
+                            <span
+                              className={`text-sm font-extrabold ${
+                                diffMs <= 120_000 ? 'text-red-400' : 'text-sax-300'
+                              }`}
+                            >
+                              {formattedClock}
+                            </span>
+                            <span className="text-[10px] text-zinc-500 font-sans">
+                              (até {formattedLimit})
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center gap-2.5 text-xs">
                       {paymentStatus === 'pending' ? (
@@ -478,9 +536,9 @@ export default function PlansModal({
                       Modo Tela Cheia exclusivo para planos Avulso e Mensal (PRO)
                     </p>
                     <p className="text-amber-200/80">
-                      O Modo Gratuito libera apenas Transposição &amp; Oitava e exportação em PDF
-                      com quebra automática. Assine ou libere avulso para usar Tela Cheia e todas as
-                      ferramentas.
+                      O Modo Gratuito libera apenas Transposição, Oitava, Quebras de Compasso/Página
+                      e exportação em PDF da 1ª parte. Assine ou libere avulso para usar Tela Cheia e
+                      todas as ferramentas.
                     </p>
                   </div>
                 </div>
@@ -672,21 +730,21 @@ export default function PlansModal({
                     <div className="flex items-center gap-2">
                       <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
                       <h4 className="font-extrabold text-emerald-200">
-                        Modo Gratuito (Passe por Conta — 1 música a cada{' '}
-                        {effectiveFreePass.cooldown_days}{' '}
+                        Modo Gratuito (1 música grátis a cada {effectiveFreePass.cooldown_days}{' '}
                         {effectiveFreePass.cooldown_days === 1 ? 'dia' : 'dias'})
                       </h4>
                     </div>
                     <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300">
-                      Grátis • Login + E-mail confirmado
+                      {effectiveFreePass.unlock_hours}h para editar e baixar • Login
                     </span>
                   </div>
 
                   <p className="text-zinc-300 leading-relaxed">
                     Permite liberar <strong>1 partitura por {effectiveFreePass.unlock_hours}h</strong>{' '}
-                    para visualizar todas as páginas e baixar PDF apenas com{' '}
-                    <strong>Transposição &amp; Oitava</strong>, quebra de compasso automática e rodapé
-                    discreto no PDF (sem Tela Cheia nem edição de cifras/cabeçalho/pautas).
+                    para visualizar todas as páginas da 1ª parte (ou pauta dupla) e baixar PDF apenas
+                    com <strong>Transposição, Oitava e Quebras de Compasso/Página</strong>, com
+                    rodapé discreto no PDF (sem Tela Cheia nem edição de cifras, cabeçalho, escala ou
+                    demais pautas).
                   </p>
 
                   {freePassError && (

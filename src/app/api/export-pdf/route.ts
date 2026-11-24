@@ -32,6 +32,8 @@ export async function POST(req: NextRequest) {
     let customPdfName: string | undefined;
     let semitoneShift: number | undefined;
     let octaveShift: number | undefined;
+    let lineBreakMeasures: number[] | undefined;
+    let pageBreakMeasures: number[] | undefined;
 
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
@@ -40,6 +42,8 @@ export async function POST(req: NextRequest) {
       const modifiedMscxField = formData.get('modifiedMscx') as string | null;
       const semiField = formData.get('semitoneShift') as string | null;
       const octField = formData.get('octaveShift') as string | null;
+      const lineBreakField = formData.get('lineBreakMeasures') as string | null;
+      const pageBreakField = formData.get('pageBreakMeasures') as string | null;
 
       if (!file) {
         return NextResponse.json(
@@ -59,6 +63,20 @@ export async function POST(req: NextRequest) {
       modifiedMscxText = modifiedMscxField || undefined;
       if (semiField !== null) semitoneShift = Number(semiField) || 0;
       if (octField !== null) octaveShift = Number(octField) || 0;
+      if (lineBreakField) {
+        try {
+          lineBreakMeasures = JSON.parse(lineBreakField) as number[];
+        } catch {
+          // Ignore invalid JSON
+        }
+      }
+      if (pageBreakField) {
+        try {
+          pageBreakMeasures = JSON.parse(pageBreakField) as number[];
+        } catch {
+          // Ignore invalid JSON
+        }
+      }
     } else {
       const body = await req.json();
       const parsed = body as {
@@ -69,6 +87,8 @@ export async function POST(req: NextRequest) {
         customPdfName?: string;
         semitoneShift?: number;
         octaveShift?: number;
+        lineBreakMeasures?: number[];
+        pageBreakMeasures?: number[];
       };
 
       if (!parsed.originalBase64) {
@@ -90,6 +110,8 @@ export async function POST(req: NextRequest) {
       customPdfName = parsed.customPdfName;
       semitoneShift = parsed.semitoneShift;
       octaveShift = parsed.octaveShift;
+      lineBreakMeasures = parsed.lineBreakMeasures;
+      pageBreakMeasures = parsed.pageBreakMeasures;
     }
 
     const resolvedFileHash = crypto
@@ -135,13 +157,15 @@ export async function POST(req: NextRequest) {
     }
 
     if (access.level === 'free_pass') {
-      // Enforcement estrito no servidor para Passe Gratuito: somente transposição + oitava + quebra automática
+      // Enforcement estrito no servidor para Passe Gratuito: somente 1ª parte (ou pauta dupla) + Tom/Oitava + Quebras
       const built = await buildFreePassRestrictedMsczBuffer({
         rawBuffer,
         fileName: uploadFileName,
         fileHash: resolvedFileHash,
         semitoneShift: semitoneShift ?? optionsObj?.semitoneShift,
         octaveShift: octaveShift ?? optionsObj?.octaveShift,
+        lineBreakMeasures: lineBreakMeasures ?? optionsObj?.lineBreakMeasures,
+        pageBreakMeasures: pageBreakMeasures ?? optionsObj?.pageBreakMeasures,
         isDev: access.isDev,
       });
       msczBuffer = built.msczBuffer;

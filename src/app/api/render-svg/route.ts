@@ -15,21 +15,27 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
+  let fileName = 'partitura.mscz';
   try {
     const body = await req.json();
     const {
       originalBase64,
-      fileName = 'partitura.mscz',
+      fileName: reqFileName = 'partitura.mscz',
       modifiedMscx,
       semitoneShift,
       octaveShift,
+      lineBreakMeasures,
+      pageBreakMeasures,
     } = body as {
       originalBase64: string;
       fileName?: string;
       modifiedMscx?: string;
       semitoneShift?: number;
       octaveShift?: number;
+      lineBreakMeasures?: number[];
+      pageBreakMeasures?: number[];
     };
+    fileName = reqFileName;
 
     if (!originalBase64) {
       return NextResponse.json(
@@ -66,14 +72,16 @@ export async function POST(req: NextRequest) {
     }
 
     let msczBuffer: Buffer;
-    if (access.level === 'free_pass') {
-      // Enforcement estrito no servidor: ignora modifiedMscx do cliente e força quebra automática
+    if (access.level === 'free_pass' || access.level === 'preview') {
+      // Enforcement estrito no servidor para preview e free_pass: apenas 1ª parte (ou pauta dupla), Tom/Oitava e Quebras
       const built = await buildFreePassRestrictedMsczBuffer({
         rawBuffer,
         fileName,
         fileHash: resolvedFileHash,
         semitoneShift,
         octaveShift,
+        lineBreakMeasures,
+        pageBreakMeasures,
         isDev: access.isDev,
       });
       msczBuffer = built.msczBuffer;
@@ -137,6 +145,10 @@ export async function POST(req: NextRequest) {
       fileHash: resolvedFileHash,
     });
   } catch (err: unknown) {
+    console.error('[api/render-svg] Erro ao renderizar SVG:', {
+      fileName,
+      error: err,
+    });
     const message =
       err instanceof Error ? err.message : 'Falha ao renderizar páginas SVG via MuseScore CLI.';
     return NextResponse.json({ error: message }, { status: 500 });

@@ -48,9 +48,13 @@ export interface ScoreHeadersState {
 
 export interface StaffSummary {
   staffId: string;
+  xmlStaffIds: string[];
+  staffCount: number;
+  isGrandStaff: boolean;
   partIndex: number;
   trackName: string;
   displayName: string;
+  partSelectorLabel: string;
   headerInstrumentLabel: string;
   instrumentId: string;
   isVisibleSolo: boolean;
@@ -59,11 +63,15 @@ export interface StaffSummary {
   transposeDiatonic: number;
   fifthsOffset: number;
   writtenSemitoneOffset: number;
+  transpositionLabel: string;
+  isTransposing: boolean;
   clef: ClefType;
 }
 
 export interface ChordOccurrence {
   occurrenceIndex: number;
+  occurrenceKey: string;
+  staffId: string;
   measureNumber: number;
   originalSymbol: string;
   currentSymbol: string;
@@ -95,7 +103,7 @@ export interface ScoreAnalysis {
   hasChords: boolean;
   hasLyrics: boolean;
   sampleChords: string[];
-  /** True if file is in Bb or Eb and has chords written in Concert Pitch (Piano) */
+  /** True if file has a transposing instrument and chords */
   needsBbEbChordPrompt: boolean;
   headers: ScoreHeadersState;
   staves: StaffSummary[];
@@ -103,6 +111,7 @@ export interface ScoreAnalysis {
   watermarkText: string;
   originalSpatium: number;
   initialLineBreakMeasures: number[];
+  initialPageBreakMeasures: number[];
 }
 
 export interface ScoreTransformOptions {
@@ -110,6 +119,8 @@ export interface ScoreTransformOptions {
   semitoneShift: number;
   /** Manual octave shift applied to active staff (-2..+2 octaves) */
   octaveShift: number;
+  /** Optional per-part octave shifts keyed by StaffSummary.staffId (-2..+2 octaves) */
+  octaveShiftsByPart?: Record<string, number>;
   /** Target instrument ID (kept from detected file instrument) */
   targetInstrumentId: string;
   /** Selected staff ID to view/export ('1', '2', '3', etc.) */
@@ -118,19 +129,21 @@ export interface ScoreTransformOptions {
   selectedStaffIds?: string[];
   /** Layout mode: portrait A4 or full-score stacked staves */
   viewMode: ScoreLayoutViewMode;
-  /** Whether visible chords on a Sib/Mib staff should be transposed to the instrument's written key */
+  /** Whether visible chords on a transposing staff should be transposed to the instrument's written key */
   convertBbEbChordsToWritten: boolean;
   /** Visibility toggles */
   showChords: boolean;
   showLyrics: boolean;
   /** Header text controls */
   headers: ScoreHeadersState;
-  /** User edits to existing chord symbols (maps transposed chord symbol or '#occurrenceIndex' -> new chord symbol) */
+  /** User edits to existing chord symbols (maps transposed chord symbol or '#staffId:idx' -> new chord symbol) */
   chordOverrides: Record<string, string>;
   /** User-created floating text boxes positioned over the score */
   floatingTexts: FloatingTextBox[];
   /** 1-based measure numbers where <LayoutBreak><subtype>line</subtype></LayoutBreak> must be active */
   lineBreakMeasures?: number[];
+  /** 1-based measure numbers where <LayoutBreak><subtype>page</subtype></LayoutBreak> must be active */
+  pageBreakMeasures?: number[];
   /** Staff scale multiplier percentage applied to <Style><Spatium> (default 100) */
   staffScalePercent?: number;
 }
@@ -309,86 +322,13 @@ function updateMscxTextPreservingFontTags(
   textEl.appendChild(doc.createTextNode(newPlainText));
 }
 
-function normalizeStaffMetaText(val: string): string {
+function escapeXmlText(val: string): string {
   return (val || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-}
-
-function shouldHideDuplicateSecondStaff(
-  detectedGroupId: InstrumentGroupId,
-  secondStaff: StaffSummary,
-  extraMeta?: {
-    rawTrackName: string;
-    rawInstrTrackName: string;
-    rawLongName: string;
-    rawInstrumentTagId: string;
-    rawInstrumentAttrId: string;
-  }
-): boolean {
-  const instrIdNorm = normalizeStaffMetaText(
-    `${secondStaff.instrumentId} ${extraMeta?.rawInstrumentTagId || ''} ${
-      extraMeta?.rawInstrumentAttrId || ''
-    }`
-  );
-  const combinedNamesNorm = normalizeStaffMetaText(
-    [
-      secondStaff.trackName,
-      secondStaff.displayName,
-      extraMeta?.rawTrackName || '',
-      extraMeta?.rawInstrTrackName || '',
-      extraMeta?.rawLongName || '',
-    ].join(' ')
-  );
-
-  // Nunca remover instrumentos de base/contracanto (Oboé, Piano, Baixo, Cello, Metais, etc.)
-  const isProtectedBaseInstrument =
-    instrIdNorm.includes('oboe') ||
-    /\boboe\b/.test(combinedNamesNorm) ||
-    instrIdNorm.includes('piano') ||
-    instrIdNorm.includes('keyboard') ||
-    instrIdNorm.includes('bass') ||
-    instrIdNorm.includes('cello') ||
-    instrIdNorm.includes('violoncello') ||
-    instrIdNorm.includes('viola') ||
-    instrIdNorm.includes('clarinet') ||
-    instrIdNorm.includes('trumpet') ||
-    instrIdNorm.includes('trombone') ||
-    instrIdNorm.includes('horn') ||
-    instrIdNorm.includes('bassoon') ||
-    (instrIdNorm.includes('flute') && !/\bflauta\s*doce\b/.test(combinedNamesNorm)) ||
-    /\b(piano|teclado|baixo|contrabaixo|bass|cello|violoncelo|viola|bateria|drums?|guitar|violao|orgao|organ|harpa|harp|trompete|trumpet|trombone|trompa|tuba|fagote|bassoon|clarinete|clarinet|flauta\s*transversal)\b/.test(
-      combinedNamesNorm
-    );
-
-  if (isProtectedBaseInstrument) {
-    return false;
-  }
-
-  // Arquivos para grupo Sib: remover 2ª pauta somente se for Sax Tenor
-  if (detectedGroupId === 'BB_TREBLE') {
-    const isTenorById =
-      instrIdNorm.includes('saxophone.tenor') ||
-      instrIdNorm.includes('tenor-sax') ||
-      instrIdNorm.includes('tenor-saxophone');
-    const isTenorByName =
-      /\bsax(ofone)?\s*tenor\b|\btenor\s*sax(ophone)?\b/.test(combinedNamesNorm);
-    return isTenorById || isTenorByName;
-  }
-
-  // Arquivos para grupo Dó: remover 2ª pauta somente se for Violino ou Flauta Doce
-  if (detectedGroupId === 'C_TREBLE') {
-    const isViolin =
-      /\bstrings\.violin\b/.test(instrIdNorm) ||
-      /\bviolin(o)?\b/.test(combinedNamesNorm);
-    const isRecorder =
-      instrIdNorm.includes('recorder') ||
-      /\bflauta\s*doce\b|\brecorder\b/.test(combinedNamesNorm);
-    return isViolin || isRecorder;
-  }
-
-  return false;
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 function detectPercussionPart(partEl: Element, trackName: string, instrumentId: string): boolean {
@@ -419,24 +359,155 @@ function detectPercussionPart(partEl: Element, trackName: string, instrumentId: 
   return false;
 }
 
-function computeStaffOffsetsFromTranspose(transposeChromatic: number): {
+export interface StaffTranspositionInfo {
   fifthsOffset: number;
   writtenSemitoneOffset: number;
-} {
-  const mod = (((-transposeChromatic) % 12) + 12) % 12;
-  if (mod === 2) {
-    // Instrumento em Sib (Bb)
-    return { fifthsOffset: 2, writtenSemitoneOffset: 2 };
+  transpositionLabel: string;
+  isTransposing: boolean;
+}
+
+export function computeStaffOffsetsFromTranspose(
+  transposeChromatic: number,
+  transposeDiatonic = 0
+): StaffTranspositionInfo {
+  const writtenSemitoneOffset = (((-transposeChromatic) % 12) + 12) % 12;
+  const instrumentPitchClass = ((transposeChromatic % 12) + 12) % 12;
+
+  switch (instrumentPitchClass) {
+    case 0:
+      return {
+        fifthsOffset: 0,
+        writtenSemitoneOffset: 0,
+        transpositionLabel: 'Dó',
+        isTransposing: false,
+      };
+    case 10:
+      return {
+        fifthsOffset: 2,
+        writtenSemitoneOffset: 2,
+        transpositionLabel: 'Sib',
+        isTransposing: true,
+      };
+    case 3:
+      return {
+        fifthsOffset: 3,
+        writtenSemitoneOffset: 9,
+        transpositionLabel: 'Mib',
+        isTransposing: true,
+      };
+    case 5:
+      return {
+        fifthsOffset: 1,
+        writtenSemitoneOffset: 7,
+        transpositionLabel: 'Fá',
+        isTransposing: true,
+      };
+    case 7:
+      return {
+        fifthsOffset: -1,
+        writtenSemitoneOffset: 5,
+        transpositionLabel: 'Sol',
+        isTransposing: true,
+      };
+    case 2:
+      return {
+        fifthsOffset: -2,
+        writtenSemitoneOffset: 10,
+        transpositionLabel: 'Ré',
+        isTransposing: true,
+      };
+    case 9:
+      return {
+        fifthsOffset: -3,
+        writtenSemitoneOffset: 3,
+        transpositionLabel: 'Lá',
+        isTransposing: true,
+      };
+    case 4:
+      return {
+        fifthsOffset: -4,
+        writtenSemitoneOffset: 8,
+        transpositionLabel: 'Mi',
+        isTransposing: true,
+      };
+    case 11:
+      return {
+        fifthsOffset: -5,
+        writtenSemitoneOffset: 1,
+        transpositionLabel: 'Si',
+        isTransposing: true,
+      };
+    case 8:
+      return {
+        fifthsOffset: 4,
+        writtenSemitoneOffset: 4,
+        transpositionLabel: 'Láb',
+        isTransposing: true,
+      };
+    case 1:
+      return {
+        fifthsOffset: 5,
+        writtenSemitoneOffset: 11,
+        transpositionLabel: 'Réb',
+        isTransposing: true,
+      };
+    case 6: {
+      const preferFlat = transposeDiatonic > 0 || (((-transposeDiatonic) % 7) + 7) % 7 === 3;
+      return {
+        fifthsOffset: normalizeKeySigFifths(preferFlat ? -6 : 6),
+        writtenSemitoneOffset: 6,
+        transpositionLabel: preferFlat ? 'Solb' : 'Fá#',
+        isTransposing: true,
+      };
+    }
+    default:
+      return {
+        fifthsOffset: 0,
+        writtenSemitoneOffset: 0,
+        transpositionLabel: 'Dó',
+        isTransposing: false,
+      };
   }
-  if (mod === 9 || mod === 3) {
-    // Instrumento em Mib (Eb)
-    return { fifthsOffset: 3, writtenSemitoneOffset: 9 };
-  }
-  if (mod === 7) {
-    // Instrumento em Fá (F)
-    return { fifthsOffset: 1, writtenSemitoneOffset: 7 };
-  }
-  return { fifthsOffset: 0, writtenSemitoneOffset: 0 };
+}
+
+function readTransposeFromPartOrInstrument(
+  partEl: Element,
+  instrEl: Element | null
+): { transposeChromatic: number; transposeDiatonic: number } {
+  const instrTransposeTag = instrEl ? getFirstDirectChildByTag(instrEl, 'transpose') : null;
+  const partTransposeTag = getFirstDirectChildByTag(partEl, 'transpose');
+
+  const chromStr =
+    (instrEl && getDirectChildText(instrEl, 'transposeChromatic')) ||
+    (instrTransposeTag && getDirectChildText(instrTransposeTag, 'chromatic')) ||
+    getDirectChildText(partEl, 'transposeChromatic') ||
+    (partTransposeTag && getDirectChildText(partTransposeTag, 'chromatic')) ||
+    '0';
+
+  const diatStr =
+    (instrEl && getDirectChildText(instrEl, 'transposeDiatonic')) ||
+    (instrTransposeTag && getDirectChildText(instrTransposeTag, 'diatonic')) ||
+    getDirectChildText(partEl, 'transposeDiatonic') ||
+    (partTransposeTag && getDirectChildText(partTransposeTag, 'diatonic')) ||
+    '0';
+
+  return {
+    transposeChromatic: parseInt(chromStr, 10) || 0,
+    transposeDiatonic: parseInt(diatStr, 10) || 0,
+  };
+}
+
+function cleanPartDisplayName(rawName: string): string {
+  return (rawName || '')
+    .replace(/\s+em\s+B♭/gi, ' Sib')
+    .replace(/\s+em\s+E♭/gi, ' Mib')
+    .replace(/\s+em\s+F\b/gi, ' Fá')
+    .replace(/\s+in\s+B♭/gi, ' Sib')
+    .replace(/\s+in\s+Bb\b/gi, ' Sib')
+    .replace(/\s+in\s+E♭/gi, ' Mib')
+    .replace(/\s+in\s+Eb\b/gi, ' Mib')
+    .replace(/\s+in\s+F\b/gi, ' Fá')
+    .trim();
 }
 
 function detectInitialInstrumentFromPart(
@@ -633,19 +704,11 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
   const doc = parser.parseFromString(xmlContent, 'text/xml');
   const workTitleEl = doc.getElementsByTagName('work-title').item(0);
   const movementTitleEl = doc.getElementsByTagName('movement-title').item(0);
-  const title =
-    (workTitleEl?.textContent || movementTitleEl?.textContent || 'Partitura MusicXML').trim();
-
-  const fifthsEl = doc.getElementsByTagName('fifths').item(0);
-  const fifths = fifthsEl ? parseInt(fifthsEl.textContent || '0', 10) || 0 : 0;
-
-  const beatsEl = doc.getElementsByTagName('beats').item(0);
-  const beatTypeEl = doc.getElementsByTagName('beat-type').item(0);
-  const sigN = beatsEl ? parseInt(beatsEl.textContent || '4', 10) || 4 : 4;
-  const sigD = beatTypeEl ? parseInt(beatTypeEl.textContent || '4', 10) || 4 : 4;
-
-  const divisionsEl = doc.getElementsByTagName('divisions').item(0);
-  const divisions = divisionsEl ? parseInt(divisionsEl.textContent || '1', 10) || 1 : 1;
+  const title = (
+    workTitleEl?.textContent ||
+    movementTitleEl?.textContent ||
+    'Partitura MusicXML'
+  ).trim();
 
   const stepToPc: Record<string, number> = {
     C: 0,
@@ -657,104 +720,337 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
     B: 11,
   };
 
-  const parts = doc.getElementsByTagName('part');
-  const firstPart = parts.item(0);
-  const measuresXml: string[] = [];
-
-  if (firstPart) {
-    const measureNodes = firstPart.getElementsByTagName('measure');
-    for (let m = 0; m < measureNodes.length; m++) {
-      const mEl = measureNodes.item(m);
-      if (!mEl) continue;
-      const voiceItems: string[] = [];
-      if (m === 0) {
-        voiceItems.push(
-          `<KeySig><accidental>${fifths}</accidental></KeySig>`,
-          `<TimeSig><sigN>${sigN}</sigN><sigD>${sigD}</sigD></TimeSig>`
-        );
-      }
-
-      const children = mEl.childNodes;
-      for (let c = 0; c < children.length; c++) {
-        const ch = children.item(c);
-        if (!ch || ch.nodeType !== 1) continue;
-        const el = ch as Element;
-
-        if (el.tagName === 'harmony') {
-          const rootStep = el.getElementsByTagName('root-step').item(0)?.textContent?.trim() || 'C';
-          const rootAlter = parseInt(
-            el.getElementsByTagName('root-alter').item(0)?.textContent || '0',
-            10
-          );
-          const kindEl = el.getElementsByTagName('kind').item(0);
-          const kindText = kindEl?.getAttribute('text') || '';
-          const pc = ((stepToPc[rootStep] ?? 0) + rootAlter + 12) % 12;
-          const rootTpc = pitchClassToSimpleTpc(pc, fifths);
-          voiceItems.push(
-            `<Harmony><root>${rootTpc}</root>${
-              kindText ? `<name>${kindText}</name>` : ''
-            }<play>0</play></Harmony>`
-          );
-        } else if (el.tagName === 'note') {
-          const isRest = el.getElementsByTagName('rest').length > 0;
-          const typeText = el.getElementsByTagName('type').item(0)?.textContent?.trim() || 'quarter';
-          const durationMap: Record<string, string> = {
-            whole: 'whole',
-            half: 'half',
-            quarter: 'quarter',
-            eighth: 'eighth',
-            '16th': '16th',
-            '32nd': '32nd',
-          };
-          const durType = durationMap[typeText] || 'quarter';
-          const dotsCount = el.getElementsByTagName('dot').length;
-          const dotsTag = dotsCount > 0 ? `<dots>${dotsCount}</dots>` : '';
-
-          const lyricText =
-            el.getElementsByTagName('text').item(0)?.textContent?.trim() || '';
-          const lyricXml = lyricText ? `<Lyrics><text>${lyricText}</text></Lyrics>` : '';
-
-          if (isRest) {
-            voiceItems.push(
-              `<Rest>${dotsTag}<durationType>${durType}</durationType>${lyricXml}</Rest>`
-            );
-          } else {
-            const step = el.getElementsByTagName('step').item(0)?.textContent?.trim() || 'C';
-            const octave = parseInt(
-              el.getElementsByTagName('octave').item(0)?.textContent || '4',
-              10
-            );
-            const alter = parseInt(
-              el.getElementsByTagName('alter').item(0)?.textContent || '0',
-              10
-            );
-            const midiPitch = (octave + 1) * 12 + (stepToPc[step] ?? 0) + alter;
-            const pc = ((midiPitch % 12) + 12) % 12;
-            const tpc = pitchClassToSimpleTpc(pc, fifths);
-            voiceItems.push(
-              `<Chord>${dotsTag}<durationType>${durType}</durationType>${lyricXml}<Note><pitch>${midiPitch}</pitch><tpc>${tpc}</tpc></Note></Chord>`
-            );
-          }
-        }
-      }
-
-      if (voiceItems.length === 0) {
-        voiceItems.push(
-          `<Rest><durationType>measure</durationType><duration>${sigN}/${sigD}</duration></Rest>`
-        );
-      }
-
-      measuresXml.push(`<Measure><voice>${voiceItems.join('\n')}</voice></Measure>`);
+  // Mapear nomes das partes em <part-list>/<score-part>
+  const partNameById = new Map<string, string>();
+  const scoreParts = doc.getElementsByTagName('score-part');
+  for (let i = 0; i < scoreParts.length; i++) {
+    const sp = scoreParts.item(i);
+    if (!sp) continue;
+    const pid = sp.getAttribute('id') || '';
+    const pName =
+      getDirectChildText(sp, 'part-name') ||
+      getDirectChildText(sp, 'part-abbreviation') ||
+      '';
+    if (pid && pName) {
+      partNameById.set(pid, pName);
     }
   }
 
-  const tonality = getTonalityByFifths(fifths);
+  const parts = doc.getElementsByTagName('part');
+  let globalDivisions = 1;
+  let initialConcertFifthsForHeader = 0;
+
+  interface ConvertedPartXml {
+    partDefXml: string;
+    staffBodiesXml: string[];
+  }
+
+  const convertedParts: ConvertedPartXml[] = [];
+  let nextXmlStaffId = 1;
+
+  for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+    const partEl = parts.item(pIdx);
+    if (!partEl) continue;
+    const partId = partEl.getAttribute('id') || `P${pIdx + 1}`;
+    const rawPartName = partNameById.get(partId) || `Parte ${pIdx + 1}`;
+    const safePartName = escapeXmlText(rawPartName);
+
+    const measureNodes = getDirectChildrenByTag(partEl, 'measure');
+    let divisions = 1;
+    let partFifths = 0;
+    let sigN = 4;
+    let sigD = 4;
+    let stavesCount = 1;
+    let transposeDiatonic = 0;
+    let transposeChromatic = 0;
+    const clefsByStaffNum: Record<number, 'G' | 'F'> = {};
+
+    // Ler metadados iniciais do primeiro bloco <attributes> do instrumento
+    for (let m = 0; m < measureNodes.length; m++) {
+      const mEl = measureNodes[m];
+      const attrEls = getDirectChildrenByTag(mEl, 'attributes');
+      for (const attr of attrEls) {
+        const divText = getDirectChildText(attr, 'divisions');
+        if (divText && m === 0) {
+          divisions = parseInt(divText, 10) || 1;
+          if (pIdx === 0) globalDivisions = divisions;
+        }
+        const stavesText = getDirectChildText(attr, 'staves');
+        if (stavesText) {
+          stavesCount = Math.max(1, Math.min(4, parseInt(stavesText, 10) || 1));
+        }
+        const keyEl = getFirstDirectChildByTag(attr, 'key');
+        if (keyEl && m === 0) {
+          partFifths = parseInt(getDirectChildText(keyEl, 'fifths', '0'), 10) || 0;
+        }
+        const timeEl = getFirstDirectChildByTag(attr, 'time');
+        if (timeEl && m === 0) {
+          sigN = parseInt(getDirectChildText(timeEl, 'beats', '4'), 10) || 4;
+          sigD = parseInt(getDirectChildText(timeEl, 'beat-type', '4'), 10) || 4;
+        }
+        const clefEls = getDirectChildrenByTag(attr, 'clef');
+        for (const cEl of clefEls) {
+          const cNum = parseInt(cEl.getAttribute('number') || '1', 10) || 1;
+          const sign = getDirectChildText(cEl, 'sign', 'G').toUpperCase();
+          if (!clefsByStaffNum[cNum]) {
+            clefsByStaffNum[cNum] = sign === 'F' ? 'F' : 'G';
+          }
+        }
+        const trEl = getFirstDirectChildByTag(attr, 'transpose');
+        if (trEl) {
+          const diat = parseInt(getDirectChildText(trEl, 'diatonic', '0'), 10) || 0;
+          const chrom = parseInt(getDirectChildText(trEl, 'chromatic', '0'), 10) || 0;
+          const octChg = parseInt(getDirectChildText(trEl, 'octave-change', '0'), 10) || 0;
+          transposeChromatic = chrom + octChg * 12;
+          transposeDiatonic = diat + octChg * 7;
+        }
+      }
+      if (m === 0) break;
+    }
+
+    const offsetInfo = computeStaffOffsetsFromTranspose(transposeChromatic, transposeDiatonic);
+    if (pIdx === 0) {
+      initialConcertFifthsForHeader = normalizeKeySigFifths(
+        partFifths - offsetInfo.fifthsOffset
+      );
+    }
+
+    const assignedStaffIds: number[] = [];
+    for (let s = 1; s <= stavesCount; s++) {
+      assignedStaffIds.push(nextXmlStaffId++);
+    }
+
+    const partStavesXml = assignedStaffIds
+      .map((sid, idx) => {
+        const defClef = clefsByStaffNum[idx + 1] === 'F' ? '<defaultClef>F</defaultClef>' : '';
+        const bracketXml =
+          stavesCount >= 2 && idx === 0
+            ? `<bracket type="1" span="${stavesCount}" col="0"/>`
+            : '';
+        return `      <Staff id="${sid}">
+        <StaffType group="pitched">
+          <name>stdNormal</name>
+        </StaffType>
+        ${defClef}
+        ${bracketXml}
+      </Staff>`;
+      })
+      .join('\n');
+
+    const transposeXml =
+      transposeChromatic !== 0 || transposeDiatonic !== 0
+        ? `<transposeDiatonic>${transposeDiatonic}</transposeDiatonic>
+        <transposeChromatic>${transposeChromatic}</transposeChromatic>`
+        : '';
+
+    const partDefXml = `    <Part>
+${partStavesXml}
+      <trackName>${safePartName}</trackName>
+      <Instrument>
+        <longName>${safePartName}</longName>
+        <trackName>${safePartName}</trackName>
+        ${transposeXml}
+        <Channel>
+          <program value="0"/>
+          <synti>Fluid</synti>
+        </Channel>
+      </Instrument>
+    </Part>`;
+
+    // Detectar quebras (<print new-system="yes"/> e <print new-page="yes"/>) no compasso M -> LayoutBreak no compasso M-1
+    const lineBreaksBefore = new Set<number>();
+    const pageBreaksBefore = new Set<number>();
+    for (let m = 0; m < measureNodes.length; m++) {
+      const mEl = measureNodes[m];
+      const prints = getDirectChildrenByTag(mEl, 'print');
+      for (const pr of prints) {
+        if ((pr.getAttribute('new-system') || '').toLowerCase() === 'yes' && m > 0) {
+          lineBreaksBefore.add(m - 1);
+        }
+        if ((pr.getAttribute('new-page') || '').toLowerCase() === 'yes' && m > 0) {
+          pageBreaksBefore.add(m - 1);
+        }
+      }
+    }
+
+    const staffBodiesXml: string[] = [];
+
+    for (let sIdx = 0; sIdx < stavesCount; sIdx++) {
+      const staffNumOneBased = sIdx + 1;
+      const xmlSid = assignedStaffIds[sIdx];
+      let currentFifths = partFifths;
+      const measuresXml: string[] = [];
+
+      for (let m = 0; m < measureNodes.length; m++) {
+        const mEl = measureNodes[m];
+        const voiceItems: string[] = [];
+        const layoutBreaksXml: string[] = [];
+
+        if (lineBreaksBefore.has(m)) {
+          layoutBreaksXml.push('<LayoutBreak><subtype>line</subtype></LayoutBreak>');
+        }
+        if (pageBreaksBefore.has(m)) {
+          layoutBreaksXml.push('<LayoutBreak><subtype>page</subtype></LayoutBreak>');
+        }
+
+        if (m === 0) {
+          if (clefsByStaffNum[staffNumOneBased] === 'F') {
+            voiceItems.push(
+              '<Clef><concertClefType>F</concertClefType><transposingClefType>F</transposingClefType></Clef>'
+            );
+          }
+          voiceItems.push(
+            `<KeySig><accidental>${currentFifths}</accidental></KeySig>`,
+            `<TimeSig><sigN>${sigN}</sigN><sigD>${sigD}</sigD></TimeSig>`
+          );
+        }
+
+        const children = mEl.childNodes;
+        for (let c = 0; c < children.length; c++) {
+          const ch = children.item(c);
+          if (!ch || ch.nodeType !== 1) continue;
+          const el = ch as Element;
+
+          if (el.tagName === 'attributes' && m > 0) {
+            const kEl = getFirstDirectChildByTag(el, 'key');
+            if (kEl) {
+              currentFifths = parseInt(getDirectChildText(kEl, 'fifths', '0'), 10) || 0;
+              voiceItems.push(`<KeySig><accidental>${currentFifths}</accidental></KeySig>`);
+            }
+          } else if (el.tagName === 'harmony') {
+            const hStaff = parseInt(getDirectChildText(el, 'staff', '1'), 10) || 1;
+            if (hStaff !== staffNumOneBased) continue;
+            const rootStep =
+              el.getElementsByTagName('root-step').item(0)?.textContent?.trim() || 'C';
+            const rootAlter = parseInt(
+              el.getElementsByTagName('root-alter').item(0)?.textContent || '0',
+              10
+            );
+            const kindEl = el.getElementsByTagName('kind').item(0);
+            const kindText = kindEl?.getAttribute('text') || '';
+            const pc = ((stepToPc[rootStep] ?? 0) + rootAlter + 12) % 12;
+            const rootTpc = pitchClassToSimpleTpc(pc, currentFifths);
+
+            const bassStep = el.getElementsByTagName('bass-step').item(0)?.textContent?.trim();
+            let bassTag = '';
+            if (bassStep) {
+              const bassAlter = parseInt(
+                el.getElementsByTagName('bass-alter').item(0)?.textContent || '0',
+                10
+              );
+              const bassPc = ((stepToPc[bassStep] ?? 0) + bassAlter + 12) % 12;
+              const bassTpc = pitchClassToSimpleTpc(bassPc, currentFifths);
+              bassTag = `<base>${bassTpc}</base>`;
+            }
+
+            voiceItems.push(
+              `<Harmony><root>${rootTpc}</root>${
+                kindText ? `<name>${escapeXmlText(kindText)}</name>` : ''
+              }${bassTag}<play>0</play></Harmony>`
+            );
+          } else if (el.tagName === 'note') {
+            const nStaff = parseInt(getDirectChildText(el, 'staff', '1'), 10) || 1;
+            if (nStaff !== staffNumOneBased) continue;
+
+            const isRest = el.getElementsByTagName('rest').length > 0;
+            const typeText =
+              el.getElementsByTagName('type').item(0)?.textContent?.trim() || 'quarter';
+            const durationMap: Record<string, string> = {
+              whole: 'whole',
+              half: 'half',
+              quarter: 'quarter',
+              eighth: 'eighth',
+              '16th': '16th',
+              '32nd': '32nd',
+            };
+            const durType = durationMap[typeText] || 'quarter';
+            const dotsCount = el.getElementsByTagName('dot').length;
+            const dotsTag = dotsCount > 0 ? `<dots>${dotsCount}</dots>` : '';
+
+            const lyricText =
+              el.getElementsByTagName('text').item(0)?.textContent?.trim() || '';
+            const lyricXml = lyricText
+              ? `<Lyrics><text>${escapeXmlText(lyricText)}</text></Lyrics>`
+              : '';
+
+            if (isRest) {
+              voiceItems.push(
+                `<Rest>${dotsTag}<durationType>${durType}</durationType>${lyricXml}</Rest>`
+              );
+            } else {
+              const step = el.getElementsByTagName('step').item(0)?.textContent?.trim() || 'C';
+              const octave = parseInt(
+                el.getElementsByTagName('octave').item(0)?.textContent || '4',
+                10
+              );
+              const alter = parseInt(
+                el.getElementsByTagName('alter').item(0)?.textContent || '0',
+                10
+              );
+              const writtenMidiPitch = (octave + 1) * 12 + (stepToPc[step] ?? 0) + alter;
+              const concertMidiPitch = writtenMidiPitch + transposeChromatic;
+              const concertPc = ((concertMidiPitch % 12) + 12) % 12;
+              const concertFifths = normalizeKeySigFifths(
+                currentFifths - offsetInfo.fifthsOffset
+              );
+              const tpc = pitchClassToSimpleTpc(concertPc, concertFifths);
+              const writtenPc = ((writtenMidiPitch % 12) + 12) % 12;
+              const tpc2Tag =
+                transposeChromatic !== 0
+                  ? `<tpc2>${pitchClassToSimpleTpc(writtenPc, currentFifths)}</tpc2>`
+                  : '';
+              voiceItems.push(
+                `<Chord>${dotsTag}<durationType>${durType}</durationType>${lyricXml}<Note><pitch>${concertMidiPitch}</pitch><tpc>${tpc}</tpc>${tpc2Tag}</Note></Chord>`
+              );
+            }
+          }
+        }
+
+        if (voiceItems.length === 0) {
+          voiceItems.push(
+            `<Rest><durationType>measure</durationType><duration>${sigN}/${sigD}</duration></Rest>`
+          );
+        }
+
+        measuresXml.push(
+          `<Measure>${layoutBreaksXml.join('')}<voice>${voiceItems.join('\n')}</voice></Measure>`
+        );
+      }
+
+      const concertHeaderTonality = getTonalityByFifths(initialConcertFifthsForHeader);
+      const vboxXml =
+        xmlSid === 1
+          ? `<VBox>
+        <height>7</height>
+        <Text>
+          <style>Title</style>
+          <text>${escapeXmlText(title)}</text>
+        </Text>
+        <Text>
+          <style>Lyricist</style>
+          <text>Tom para Piano:\n${concertHeaderTonality.majorName}</text>
+        </Text>
+        <Text>
+          <style>Composer</style>
+          <text>${safePartName}</text>
+        </Text>
+      </VBox>`
+          : '';
+
+      staffBodiesXml.push(`    <Staff id="${xmlSid}">
+      ${vboxXml}
+      ${measuresXml.join('\n      ')}
+    </Staff>`);
+    }
+
+    convertedParts.push({ partDefXml, staffBodiesXml });
+  }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <museScore version="3.02">
   <programVersion>3.6.2</programVersion>
   <Score>
-    <Division>${divisions * 480}</Division>
+    <Division>${globalDivisions * 480}</Division>
     <Style>
       <pageWidth>8.27</pageWidth>
       <pageHeight>11.69</pageHeight>
@@ -765,41 +1061,9 @@ export function convertMusicXmlToMscxIfNeeded(xmlContent: string): string {
       <Spatium>1.75</Spatium>
     </Style>
     <metaTag name="copyright">Rubsax Partituras</metaTag>
-    <metaTag name="workTitle">${title}</metaTag>
-    <Part>
-      <Staff id="1">
-        <StaffType group="pitched">
-          <name>stdNormal</name>
-        </StaffType>
-      </Staff>
-      <trackName>Instrumento</trackName>
-      <Instrument id="violin">
-        <trackName>Instrumento</trackName>
-        <instrumentId>strings.violin</instrumentId>
-        <Channel>
-          <program value="40"/>
-          <synti>Fluid</synti>
-        </Channel>
-      </Instrument>
-    </Part>
-    <Staff id="1">
-      <VBox>
-        <height>7</height>
-        <Text>
-          <style>Title</style>
-          <text>${title}</text>
-        </Text>
-        <Text>
-          <style>Lyricist</style>
-          <text>Tom para Piano:\n${tonality.majorName}</text>
-        </Text>
-        <Text>
-          <style>Composer</style>
-          <text>Instrumento em Dó</text>
-        </Text>
-      </VBox>
-      ${measuresXml.join('\n      ')}
-    </Staff>
+    <metaTag name="workTitle">${escapeXmlText(title)}</metaTag>
+${convertedParts.map((p) => p.partDefXml).join('\n')}
+${convertedParts.flatMap((p) => p.staffBodiesXml).join('\n')}
   </Score>
 </museScore>`;
 }
@@ -950,83 +1214,135 @@ export function analyzeScoreXml(
   }
 
   const stavesSummary: StaffSummary[] = [];
-  const staffInspectMeta: Array<{
-    rawTrackName: string;
-    rawInstrTrackName: string;
-    rawLongName: string;
-    rawInstrumentTagId: string;
-    rawInstrumentAttrId: string;
-  }> = [];
   let mainStaffId = '1';
   let origTransposeChromatic = 0;
   let origTransposeDiatonic = 0;
   let origClef: ClefType = 'G';
   let mainTrackName = '';
   let mainInstrumentId = '';
+  let nextAutoStaffId = 1;
 
-  partEls.forEach((partEl, pIdx) => {
-    const trackName = getDirectChildText(partEl, 'trackName');
-    const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
-    const longName = instrEl ? cleanMscxTextNode(getFirstDirectChildByTag(instrEl, 'longName')) : '';
-    const instrTrackName = instrEl ? getDirectChildText(instrEl, 'trackName') : '';
-    const instrTagId = instrEl ? getDirectChildText(instrEl, 'instrumentId') : '';
-    const instrAttrId = instrEl ? instrEl.getAttribute('id') || '' : '';
-    const instrId = instrTagId || instrAttrId;
-    const tChrom = instrEl
-      ? parseInt(getDirectChildText(instrEl, 'transposeChromatic', '0'), 10) || 0
-      : 0;
-    const tDiat = instrEl
-      ? parseInt(getDirectChildText(instrEl, 'transposeDiatonic', '0'), 10) || 0
-      : 0;
-    const isPerc = detectPercussionPart(partEl, trackName || instrTrackName, instrId);
-    const { fifthsOffset, writtenSemitoneOffset } = computeStaffOffsetsFromTranspose(tChrom);
+  if (partEls.length > 0) {
+    partEls.forEach((partEl, pIdx) => {
+      const trackName = getDirectChildText(partEl, 'trackName');
+      const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
+      const longName = instrEl
+        ? cleanMscxTextNode(getFirstDirectChildByTag(instrEl, 'longName'))
+        : '';
+      const instrTrackName = instrEl ? getDirectChildText(instrEl, 'trackName') : '';
+      const instrTagId = instrEl ? getDirectChildText(instrEl, 'instrumentId') : '';
+      const instrAttrId = instrEl ? instrEl.getAttribute('id') || '' : '';
+      const instrId = instrTagId || instrAttrId;
+      const { transposeChromatic: tChrom, transposeDiatonic: tDiat } =
+        readTransposeFromPartOrInstrument(partEl, instrEl);
 
-    const partStaves = getDirectChildrenByTag(partEl, 'Staff');
-    partStaves.forEach((pStaff, sIdx) => {
-      const sid = pStaff.getAttribute('id') || String(stavesSummary.length + 1);
-      const defClefText = getDirectChildText(pStaff, 'defaultClef', 'G').toUpperCase();
-      const clef: ClefType = defClefText.startsWith('F') ? 'F' : 'G';
-      const isMain = pIdx === 0 && sIdx === 0;
+      const isPerc = detectPercussionPart(partEl, trackName || instrTrackName, instrId);
+      const transposeInfo = isPerc
+        ? {
+            fifthsOffset: 0,
+            writtenSemitoneOffset: 0,
+            transpositionLabel: 'Dó',
+            isTransposing: false,
+          }
+        : computeStaffOffsetsFromTranspose(tChrom, tDiat);
+
+      const partStaves = getDirectChildrenByTag(partEl, 'Staff');
+      const xmlStaffIds: string[] = [];
+      let partClef: ClefType = 'G';
+
+      if (partStaves.length > 0) {
+        partStaves.forEach((pStaff, sIdx) => {
+          const sid = pStaff.getAttribute('id') || String(nextAutoStaffId);
+          nextAutoStaffId++;
+          xmlStaffIds.push(sid);
+          if (sIdx === 0) {
+            const defClefText = getDirectChildText(pStaff, 'defaultClef', 'G').toUpperCase();
+            partClef = defClefText.startsWith('F') ? 'F' : 'G';
+          }
+        });
+      } else {
+        const sid = String(nextAutoStaffId);
+        nextAutoStaffId++;
+        xmlStaffIds.push(sid);
+      }
+
+      const primaryStaffId = xmlStaffIds[0] || String(pIdx + 1);
+      const staffCount = xmlStaffIds.length;
+      const isGrandStaff = staffCount >= 2;
+      const isMain = pIdx === 0;
 
       const rawDisplayName =
-        trackName || instrTrackName || longName || (isPerc ? 'Bateria' : `Pauta ${sid}`);
-      const cleanName = rawDisplayName.replace(/\s+em\s+B♭/i, ' Sib').replace(/\s+em\s+E♭/i, ' Mib');
+        trackName || instrTrackName || longName || (isPerc ? 'Bateria' : `Parte ${pIdx + 1}`);
+      const cleanName = cleanPartDisplayName(rawDisplayName) || `Parte ${pIdx + 1}`;
+      const partSelectorLabel =
+        staffCount === 2
+          ? `${cleanName} (Pauta Dupla)`
+          : staffCount > 2
+          ? `${cleanName} (${staffCount} Pautas)`
+          : cleanName;
 
       if (isMain) {
-        mainStaffId = sid;
+        mainStaffId = primaryStaffId;
         origTransposeChromatic = tChrom;
         origTransposeDiatonic = tDiat;
-        origClef = clef;
+        origClef = partClef;
         mainTrackName = rawDisplayName;
         mainInstrumentId = instrId;
       }
 
       stavesSummary.push({
-        staffId: sid,
+        staffId: primaryStaffId,
+        xmlStaffIds,
+        staffCount,
+        isGrandStaff,
         partIndex: pIdx,
         trackName: rawDisplayName,
         displayName: cleanName,
-        headerInstrumentLabel: isMain
-          ? composerText || rawDisplayName
-          : rawDisplayName,
+        partSelectorLabel,
+        headerInstrumentLabel: isMain ? composerText || cleanName : cleanName,
         instrumentId: instrId,
         isVisibleSolo: isMain,
         isPercussion: isPerc,
         transposeChromatic: tChrom,
         transposeDiatonic: tDiat,
-        fifthsOffset,
-        writtenSemitoneOffset,
-        clef,
-      });
-      staffInspectMeta.push({
-        rawTrackName: trackName,
-        rawInstrTrackName: instrTrackName,
-        rawLongName: longName,
-        rawInstrumentTagId: instrTagId,
-        rawInstrumentAttrId: instrAttrId,
+        fifthsOffset: transposeInfo.fifthsOffset,
+        writtenSemitoneOffset: transposeInfo.writtenSemitoneOffset,
+        transpositionLabel: transposeInfo.transpositionLabel,
+        isTransposing: transposeInfo.isTransposing,
+        clef: partClef,
       });
     });
-  });
+  } else {
+    staffBodies.forEach((sb, idx) => {
+      const sid = sb.getAttribute('id') || String(idx + 1);
+      const isMain = idx === 0;
+      const cleanName = `Pauta ${sid}`;
+      if (isMain) {
+        mainStaffId = sid;
+      }
+      stavesSummary.push({
+        staffId: sid,
+        xmlStaffIds: [sid],
+        staffCount: 1,
+        isGrandStaff: false,
+        partIndex: idx,
+        trackName: cleanName,
+        displayName: cleanName,
+        partSelectorLabel: cleanName,
+        headerInstrumentLabel: isMain ? composerText || cleanName : cleanName,
+        instrumentId: '',
+        isVisibleSolo: isMain,
+        isPercussion: false,
+        transposeChromatic: 0,
+        transposeDiatonic: 0,
+        fifthsOffset: 0,
+        writtenSemitoneOffset: 0,
+        transpositionLabel: 'Dó',
+        isTransposing: false,
+        clef: 'G',
+      });
+    });
+  }
 
   const mainStaffBody =
     staffBodies.find((s) => (s.getAttribute('id') || '1') === mainStaffId) || staffBodies[0];
@@ -1053,64 +1369,65 @@ export function analyzeScoreXml(
     origClef
   );
 
-  // Atualizar displayName da Pauta 1 com nome amigável caso trackName estivesse genérico
+  // Atualizar displayName da 1ª parte com nome amigável caso trackName estivesse genérico
   if (stavesSummary[0]) {
-    if (!stavesSummary[0].trackName || stavesSummary[0].trackName === 'Pauta 1') {
+    if (
+      !stavesSummary[0].trackName ||
+      stavesSummary[0].trackName === 'Pauta 1' ||
+      stavesSummary[0].trackName === 'Parte 1'
+    ) {
       stavesSummary[0].trackName = detectedInstrument.name;
       stavesSummary[0].displayName = detectedInstrument.name;
+      stavesSummary[0].partSelectorLabel =
+        stavesSummary[0].staffCount === 2
+          ? `${detectedInstrument.name} (Pauta Dupla)`
+          : stavesSummary[0].staffCount > 2
+          ? `${detectedInstrument.name} (${stavesSummary[0].staffCount} Pautas)`
+          : detectedInstrument.name;
     }
   }
 
-  let writtenKeyFifths = 0;
-  if (mainStaffBody) {
-    const keySigs = mainStaffBody.getElementsByTagName('KeySig');
-    if (keySigs.length > 0) {
-      const accText = getDirectChildText(keySigs.item(0)!, 'accidental', '0');
-      writtenKeyFifths = normalizeKeySigFifths(parseInt(accText, 10) || 0);
+  const getFirstMeasureKeyFifths = (staffBody: Element | undefined): number | null => {
+    if (!staffBody) return null;
+    const measures = getDirectChildrenByTag(staffBody, 'Measure');
+    const firstMeasure = measures[0];
+    if (!firstMeasure) {
+      const keySigs = staffBody.getElementsByTagName('KeySig');
+      if (keySigs.length > 0) {
+        const accText = getDirectChildText(keySigs.item(0)!, 'accidental', '0');
+        return normalizeKeySigFifths(parseInt(accText, 10) || 0);
+      }
+      return null;
     }
-  }
+    const keySigsInFirst = firstMeasure.getElementsByTagName('KeySig');
+    if (keySigsInFirst.length === 0) return 0;
+    const accText = getDirectChildText(keySigsInFirst.item(0)!, 'accidental', '0');
+    return normalizeKeySigFifths(parseInt(accText, 10) || 0);
+  };
+
+  const writtenKeyFifths = getFirstMeasureKeyFifths(mainStaffBody) ?? 0;
 
   const mainFifthsOffset =
     stavesSummary[0]?.fifthsOffset ?? detectedInstrument.fifthsOffset;
   let concertKeyFifths = normalizeKeySigFifths(writtenKeyFifths - mainFifthsOffset);
 
-  if (staffBodies.length > 1) {
-    const secondStaff = staffBodies[1];
-    const secondSummary = stavesSummary[1];
-    if (
-      secondStaff &&
-      secondSummary &&
-      !secondSummary.isPercussion &&
-      secondSummary.transposeChromatic === 0
-    ) {
-      const ks2 = secondStaff.getElementsByTagName('KeySig');
-      if (ks2.length > 0) {
-        const acc2 = parseInt(getDirectChildText(ks2.item(0)!, 'accidental', '0'), 10);
-        if (!Number.isNaN(acc2)) {
-          concertKeyFifths = normalizeKeySigFifths(acc2);
-        }
-      }
+  const nonTransposingPart = stavesSummary.find((s) => !s.isPercussion && !s.isTransposing);
+  if (nonTransposingPart) {
+    const cStaffBody =
+      staffBodies.find((sb) => (sb.getAttribute('id') || '') === nonTransposingPart.staffId) ||
+      (staffBodies.length === 1 ? staffBodies[0] : undefined);
+    const cFifths = getFirstMeasureKeyFifths(cStaffBody);
+    if (cFifths !== null) {
+      concertKeyFifths = cFifths;
     }
   }
 
   const concertTonality = getTonalityByFifths(concertKeyFifths);
   const writtenTonality = getTonalityByFifths(writtenKeyFifths);
 
-  // Filtro cirúrgico na 2ª pauta (índice 1) para variações de oitava melódica sem afetar base/Oboé
+  // Filtro inteligente descontinuado na v1.4: todas as partes permanecem disponíveis
   const hiddenDuplicateStaffIds: string[] = [];
-  if (stavesSummary.length >= 2 && stavesSummary[1] && !stavesSummary[1].isPercussion) {
-    if (
-      shouldHideDuplicateSecondStaff(
-        detectedInstrument.groupId,
-        stavesSummary[1],
-        staffInspectMeta[1]
-      )
-    ) {
-      hiddenDuplicateStaffIds.push(stavesSummary[1].staffId);
-    }
-  }
-  const hiddenSet = new Set(hiddenDuplicateStaffIds);
-  const visibleStavesSummary = stavesSummary.filter((s) => !hiddenSet.has(s.staffId));
+  const visibleStavesSummary = stavesSummary;
 
   const styleEl = getFirstDirectChildByTag(scoreEl, 'Style');
   const rawSpatium = styleEl
@@ -1125,34 +1442,41 @@ export function analyzeScoreXml(
   let lyricCount = 0;
   const sampleChords: string[] = [];
   const concertPitches: number[] = [];
-  const initialLineBreakMeasures: number[] = [];
+  const lineBreakSetFound = new Set<number>();
+  const pageBreakSetFound = new Set<number>();
 
-  if (mainStaffBody) {
-    const measures = getDirectChildrenByTag(mainStaffBody, 'Measure');
-    measureCount = measures.length;
+  staffBodies.forEach((sb, idx) => {
+    const measures = getDirectChildrenByTag(sb, 'Measure');
+    if (measures.length > measureCount) {
+      measureCount = measures.length;
+    }
 
-    measures.forEach((mEl, idx) => {
+    measures.forEach((mEl, mIdx) => {
       const breaks = getDirectChildrenByTag(mEl, 'LayoutBreak');
-      const hasLineBreak = breaks.some(
-        (lb) => getDirectChildText(lb, 'subtype').toLowerCase() === 'line'
-      );
-      if (hasLineBreak) {
-        initialLineBreakMeasures.push(idx + 1);
+      for (const lb of breaks) {
+        const sub = getDirectChildText(lb, 'subtype').toLowerCase();
+        if (sub === 'line') lineBreakSetFound.add(mIdx + 1);
+        if (sub === 'page') pageBreakSetFound.add(mIdx + 1);
       }
     });
 
-    const notes = mainStaffBody.getElementsByTagName('Note');
-    noteCount = notes.length;
-    for (let i = 0; i < notes.length; i++) {
-      const nEl = notes.item(i)!;
-      const pVal = parseInt(getDirectChildText(nEl, 'pitch', '60'), 10);
-      if (!Number.isNaN(pVal)) {
-        concertPitches.push(pVal);
+    if (idx === 0 || sb === mainStaffBody) {
+      const notes = sb.getElementsByTagName('Note');
+      if (notes.length > noteCount) {
+        noteCount = notes.length;
+        concertPitches.length = 0;
+        for (let i = 0; i < notes.length; i++) {
+          const nEl = notes.item(i)!;
+          const pVal = parseInt(getDirectChildText(nEl, 'pitch', '60'), 10);
+          if (!Number.isNaN(pVal)) {
+            concertPitches.push(pVal);
+          }
+        }
       }
     }
 
-    const harmonies = mainStaffBody.getElementsByTagName('Harmony');
-    chordCount = harmonies.length;
+    const harmonies = sb.getElementsByTagName('Harmony');
+    chordCount += harmonies.length;
     for (let i = 0; i < harmonies.length; i++) {
       const hEl = harmonies.item(i)!;
       const rootTpc = parseInt(getDirectChildText(hEl, 'root', '14'), 10);
@@ -1167,9 +1491,12 @@ export function analyzeScoreXml(
       }
     }
 
-    const lyrics = mainStaffBody.getElementsByTagName('Lyrics');
-    lyricCount = lyrics.length;
-  }
+    const lyrics = sb.getElementsByTagName('Lyrics');
+    lyricCount += lyrics.length;
+  });
+
+  const initialLineBreakMeasures = Array.from(lineBreakSetFound).sort((a, b) => a - b);
+  const initialPageBreakMeasures = Array.from(pageBreakSetFound).sort((a, b) => a - b);
 
   let medianConcertPitch = 65;
   if (concertPitches.length > 0) {
@@ -1177,10 +1504,7 @@ export function analyzeScoreXml(
     medianConcertPitch = sorted[Math.floor(sorted.length / 2)];
   }
 
-  const isBbOrEb =
-    detectedInstrument.groupId === 'BB_TREBLE' ||
-    detectedInstrument.groupId === 'EB_TREBLE' ||
-    mainFifthsOffset !== 0;
+  const hasAnyTransposingPart = stavesSummary.some((s) => s.isTransposing);
 
   const defaultLyricistText =
     lyricistText || `Tom para Piano:\n${concertTonality.majorName}`;
@@ -1209,7 +1533,7 @@ export function analyzeScoreXml(
     hasChords: chordCount > 0,
     hasLyrics: lyricCount > 0,
     sampleChords,
-    needsBbEbChordPrompt: isBbOrEb && chordCount > 0,
+    needsBbEbChordPrompt: (hasAnyTransposingPart || mainFifthsOffset !== 0) && chordCount > 0,
     headers: {
       showAllHeaders: true,
       title: {
@@ -1240,6 +1564,7 @@ export function analyzeScoreXml(
     watermarkText: 'Rubsax Partituras',
     originalSpatium,
     initialLineBreakMeasures,
+    initialPageBreakMeasures,
   };
 }
 
@@ -1267,34 +1592,41 @@ export function transformScoreXml(
   const viewMode: ScoreLayoutViewMode = options.viewMode || 'portrait';
   const isFullScore = viewMode === 'full-score';
 
-  // Determinar conjunto de pautas ativas (Grade Completa = todas não ocultas, ou seleção múltipla personalizada)
-  const hiddenIdsSet = new Set(analysis.hiddenDuplicateStaffIds || []);
-  const rawSelectedIds = (
-    isFullScore
-      ? analysis.staves.map((s) => s.staffId)
-      : options.selectedStaffIds && options.selectedStaffIds.length > 0
-      ? options.selectedStaffIds
-      : [options.selectedStaffId || analysis.staves[0]?.staffId || '1']
-  ).filter((id) => !hiddenIdsSet.has(id));
+  // Determinar partes selecionadas (agrupando pautas duplas pertencentes à mesma <Part>)
+  const rawSelectedIds = isFullScore
+    ? analysis.staves.map((s) => s.staffId)
+    : options.selectedStaffIds && options.selectedStaffIds.length > 0
+    ? options.selectedStaffIds
+    : [options.selectedStaffId || analysis.staves[0]?.staffId || '1'];
 
-  if (rawSelectedIds.length === 0 && analysis.staves[0]) {
-    rawSelectedIds.push(analysis.staves[0].staffId);
+  const activeStavesList = analysis.staves.filter(
+    (s) =>
+      rawSelectedIds.includes(s.staffId) ||
+      (Array.isArray(s.xmlStaffIds) && s.xmlStaffIds.some((xid) => rawSelectedIds.includes(xid)))
+  );
+  if (activeStavesList.length === 0 && analysis.staves[0]) {
+    activeStavesList.push(analysis.staves[0]);
   }
 
-  const activeStaffIdsSet = new Set(rawSelectedIds);
-  const activeStavesList = analysis.staves.filter((s) =>
-    activeStaffIdsSet.has(s.staffId)
+  const activeXmlStaffIdsSet = new Set(
+    activeStavesList.flatMap((s) =>
+      Array.isArray(s.xmlStaffIds) && s.xmlStaffIds.length > 0 ? s.xmlStaffIds : [s.staffId]
+    )
   );
-  const multipleStavesActive = activeStavesList.length > 1;
+  const multipleInstrumentsActive = activeStavesList.length > 1;
 
-  // Identificar pauta primária de referência (primeira pauta ativa)
-  const activeStaff =
+  // Identificar parte primária de referência
+  const activeStaff: StaffSummary =
     activeStavesList[0] ||
     analysis.staves[0] || {
       staffId: '1',
+      xmlStaffIds: ['1'],
+      staffCount: 1,
+      isGrandStaff: false,
       partIndex: 0,
       trackName: targetInstrument.name,
       displayName: targetInstrument.name,
+      partSelectorLabel: targetInstrument.name,
       headerInstrumentLabel: targetInstrument.headerInstrumentText,
       instrumentId: targetInstrument.musescoreInstrumentId,
       isVisibleSolo: true,
@@ -1303,10 +1635,17 @@ export function transformScoreXml(
       transposeDiatonic: analysis.originalTransposeDiatonic,
       fifthsOffset: targetInstrument.fifthsOffset,
       writtenSemitoneOffset: targetInstrument.writtenSemitoneOffset,
+      transpositionLabel:
+        targetInstrument.fifthsOffset === 2
+          ? 'Sib'
+          : targetInstrument.fifthsOffset === 3
+          ? 'Mib'
+          : 'Dó',
+      isTransposing: targetInstrument.writtenSemitoneOffset !== 0,
       clef: analysis.originalClef,
     };
 
-  // 1. Calcular nova Tonalidade Base (Piano / Dó) e Tonalidade Escrita na Pauta Ativa
+  // 1. Calcular nova Tonalidade Base (Piano / Dó) e Tonalidade Escrita na Parte Ativa
   const newConcertPc =
     ((analysis.originalConcertPitchClass + semitoneShift) % 12 + 12) % 12;
   const concertTonality = getTonalityByPitchClass(newConcertPc);
@@ -1333,7 +1672,7 @@ export function transformScoreXml(
   setOrCreateDirectChildText(doc, styleEl, 'showFooter', '1');
   setOrCreateDirectChildText(doc, styleEl, 'footerFirstPage', '1');
 
-  if (multipleStavesActive) {
+  if (multipleInstrumentsActive) {
     setOrCreateDirectChildText(doc, styleEl, 'hideInstrumentNameIfOneInstrument', '0');
   }
 
@@ -1390,20 +1729,23 @@ export function transformScoreXml(
     scoreEl.appendChild(cMeta);
   }
 
-  // 4. Configurar visibilidade dos <Part>s conforme as pautas selecionadas ou Grade Completa
+  // 4. Configurar visibilidade dos <Part>s conforme as partes selecionadas ou Grade Completa
   const partEls = getDirectChildrenByTag(scoreEl, 'Part');
-  partEls.forEach((partEl, pIdx) => {
+  let fallbackStaffCounter = 1;
+  partEls.forEach((partEl) => {
     const partStaffEls = getDirectChildrenByTag(partEl, 'Staff');
-    const partStaffIds = partStaffEls.map(
-      (ps, i) => ps.getAttribute('id') || String(pIdx + i + 1)
-    );
-    const hasAnyActiveStaff = partStaffIds.some((id) => activeStaffIdsSet.has(id));
+    const partStaffIds = partStaffEls.map((ps) => {
+      const id = ps.getAttribute('id') || String(fallbackStaffCounter);
+      fallbackStaffCounter++;
+      return id;
+    });
+    const hasAnyActiveStaff = partStaffIds.some((id) => activeXmlStaffIdsSet.has(id));
 
     if (hasAnyActiveStaff) {
       removeDirectChildrenByTag(partEl, 'show');
       partStaffEls.forEach((ps, i) => {
-        const psId = ps.getAttribute('id') || String(pIdx + i + 1);
-        if (activeStaffIdsSet.has(psId)) {
+        const psId = partStaffIds[i];
+        if (activeXmlStaffIdsSet.has(psId)) {
           removeDirectChildrenByTag(ps, 'invisible');
           removeDirectChildrenByTag(ps, 'visible');
         } else {
@@ -1411,7 +1753,7 @@ export function transformScoreXml(
         }
       });
 
-      if (multipleStavesActive) {
+      if (multipleInstrumentsActive) {
         const instrEl = getFirstDirectChildByTag(partEl, 'Instrument');
         const tName = getDirectChildText(partEl, 'trackName');
         if (instrEl && tName && !getFirstDirectChildByTag(instrEl, 'longName')) {
@@ -1450,14 +1792,14 @@ export function transformScoreXml(
 
   // Atualizar cabeçalhos e injetar Caixas de Texto Flutuantes no VBox principal
   if (firstStaffBody) {
-    const allStavesSelected =
+    const allPartsSelected =
       analysis.staves.length > 1 &&
       activeStavesList.length === analysis.staves.length;
 
     const headerLabelForActiveMode =
-      isFullScore || allStavesSelected
+      isFullScore || allPartsSelected
         ? 'Grade Completa'
-        : multipleStavesActive
+        : multipleInstrumentsActive
         ? activeStavesList.map((s) => s.displayName).join(' + ')
         : activeStaff.headerInstrumentLabel;
 
@@ -1476,21 +1818,40 @@ export function transformScoreXml(
     );
   }
 
-  // 6. Processar cada <Staff> dentro de <Score> (Quebras de Sistema, Transposição, Oitava, Cifras e Letras)
+  // 6. Processar cada <Staff> dentro de <Score> (Quebras de Sistema/Página, Transposição, Oitava, Cifras e Letras)
   const clampedOctaveShift = Math.max(-2, Math.min(2, Math.round(options.octaveShift || 0)));
-  const manualOctaveSemitones = clampedOctaveShift * 12;
+  const activePartOctave = options.octaveShiftsByPart
+    ? Math.max(-2, Math.min(2, Math.round(options.octaveShiftsByPart[activeStaff.staffId] ?? 0)))
+    : multipleInstrumentsActive
+    ? 0
+    : clampedOctaveShift;
+  const manualOctaveSemitones = activePartOctave * 12;
+
   const previewChords: string[] = [];
   const chordOccurrences: ChordOccurrence[] = [];
   const hasExplicitLineBreaks = options.lineBreakMeasures !== undefined;
   const lineBreakSet = hasExplicitLineBreaks ? new Set(options.lineBreakMeasures) : null;
+  const hasExplicitPageBreaks = options.pageBreakMeasures !== undefined;
+  const pageBreakSet = hasExplicitPageBreaks ? new Set(options.pageBreakMeasures) : null;
+
+  // Bloqueia conversão global para tom escrito quando houver mistura de afinações na tela
+  const pitchedActiveParts = activeStavesList.filter((s) => !s.isPercussion);
+  const uniqueWrittenOffsets = new Set(
+    pitchedActiveParts.map((s) => s.writtenSemitoneOffset)
+  );
+  const allowGlobalWrittenChords =
+    uniqueWrittenOffsets.size === 1 &&
+    pitchedActiveParts.some((s) => s.isTransposing);
 
   staffBodies.forEach((staffBody, sIdx) => {
     const sid = staffBody.getAttribute('id') || String(sIdx + 1);
-    const isHiddenDuplicate = hiddenIdsSet.has(sid);
-    const staffMeta = isHiddenDuplicate
-      ? undefined
-      : analysis.staves.find((st) => st.staffId === sid) || analysis.staves[sIdx];
-    const isThisStaffActive = !isHiddenDuplicate && activeStaffIdsSet.has(sid);
+    const staffMeta =
+      analysis.staves.find(
+        (st) =>
+          st.staffId === sid ||
+          (Array.isArray(st.xmlStaffIds) && st.xmlStaffIds.includes(sid))
+      ) || analysis.staves[sIdx];
+    const isThisStaffActive = activeXmlStaffIdsSet.has(sid);
     const isPercussion = staffMeta ? staffMeta.isPercussion : false;
     const staffFifthsOffset = staffMeta ? staffMeta.fifthsOffset : 0;
     const staffWrittenSemitoneOffset = staffMeta ? staffMeta.writtenSemitoneOffset : 0;
@@ -1502,25 +1863,36 @@ export function transformScoreXml(
       setOrCreateDirectChildText(doc, staffBody, 'visible', '0', 'Measure');
     }
 
-    // Atualizar <LayoutBreak><subtype>line</subtype></LayoutBreak> em todos os compassos desta pauta
-    if (lineBreakSet) {
-      const staffMeasures = getDirectChildrenByTag(staffBody, 'Measure');
+    const staffMeasures = getDirectChildrenByTag(staffBody, 'Measure');
+
+    // Atualizar <LayoutBreak> de linha (compasso) e página em todos os compassos desta pauta
+    if (lineBreakSet || pageBreakSet) {
       staffMeasures.forEach((mEl, mIdx) => {
+        const mNum = mIdx + 1;
         const existingBreaks = getDirectChildrenByTag(mEl, 'LayoutBreak');
         for (const lb of existingBreaks) {
-          if (getDirectChildText(lb, 'subtype').toLowerCase() === 'line') {
+          const subtype = getDirectChildText(lb, 'subtype').toLowerCase();
+          if (lineBreakSet && subtype === 'line') {
+            mEl.removeChild(lb);
+          } else if (pageBreakSet && subtype === 'page') {
             mEl.removeChild(lb);
           }
         }
-        if (lineBreakSet.has(mIdx + 1)) {
+        const insertBreak = (subtype: 'line' | 'page') => {
           const lbEl = doc.createElement('LayoutBreak');
-          setOrCreateDirectChildText(doc, lbEl, 'subtype', 'line');
+          setOrCreateDirectChildText(doc, lbEl, 'subtype', subtype);
           const firstVoice = getFirstDirectChildByTag(mEl, 'voice');
           if (firstVoice) {
             mEl.insertBefore(lbEl, firstVoice);
           } else {
             mEl.appendChild(lbEl);
           }
+        };
+        if (lineBreakSet && lineBreakSet.has(mNum)) {
+          insertBreak('line');
+        }
+        if (pageBreakSet && pageBreakSet.has(mNum)) {
+          insertBreak('page');
         }
       });
     }
@@ -1545,25 +1917,54 @@ export function transformScoreXml(
     );
     const fifthsDeltaForModulations = targetStaffKeyFifths - origStaffKeyFifths;
 
-    // 6a. Atualizar armaduras de clave (<KeySig>)
-    const keySigNodes = staffBody.getElementsByTagName('KeySig');
-    for (let i = 0; i < keySigNodes.length; i++) {
-      const ksNode = keySigNodes.item(i)!;
+    // 6a. Atualizar armaduras de clave (<KeySig>) — inclusive criando no 1º compasso caso estivesse em Dó sem tag <KeySig>
+    const firstMeasure = staffMeasures[0];
+    const existingFirstKeySigs = firstMeasure
+      ? Array.from(firstMeasure.getElementsByTagName('KeySig'))
+      : [];
+    const preExistingKeySigs = Array.from(staffBody.getElementsByTagName('KeySig'));
+    for (const ksNode of preExistingKeySigs) {
+      const isFirstMeasureKs = existingFirstKeySigs.includes(ksNode);
       const oldAcc = parseInt(getDirectChildText(ksNode, 'accidental', '0'), 10) || 0;
-      const newAcc =
-        i === 0
-          ? targetStaffKeyFifths
-          : normalizeKeySigFifths(oldAcc + fifthsDeltaForModulations);
+      const newAcc = isFirstMeasureKs
+        ? targetStaffKeyFifths
+        : normalizeKeySigFifths(oldAcc + fifthsDeltaForModulations);
       setOrCreateDirectChildText(doc, ksNode, 'accidental', String(newAcc));
     }
+    if (existingFirstKeySigs.length === 0 && firstMeasure && targetStaffKeyFifths !== 0) {
+      const voiceEl = getFirstDirectChildByTag(firstMeasure, 'voice');
+      if (voiceEl) {
+        const ksEl = doc.createElement('KeySig');
+        setOrCreateDirectChildText(doc, ksEl, 'accidental', String(targetStaffKeyFifths));
+        const clefChild = getFirstDirectChildByTag(voiceEl, 'Clef');
+        const timeChild = getFirstDirectChildByTag(voiceEl, 'TimeSig');
+        if (clefChild && clefChild.nextSibling) {
+          voiceEl.insertBefore(ksEl, clefChild.nextSibling);
+        } else if (timeChild) {
+          voiceEl.insertBefore(ksEl, timeChild);
+        } else if (voiceEl.firstChild) {
+          voiceEl.insertBefore(ksEl, voiceEl.firstChild);
+        } else {
+          voiceEl.appendChild(ksEl);
+        }
+      }
+    }
 
-    // 6b. Transpor todas as notas (<Note>) da pauta com regra estrita de acidentes simples (# ou b)
+    // 6b. Transpor todas as notas (<Note>) da pauta com regra estrita de acidentes simples (# ou b) e oitava isolada por parte
+    let partOctaveForThisStaff = 0;
+    if (staffMeta) {
+      if (options.octaveShiftsByPart) {
+        partOctaveForThisStaff = Math.max(
+          -2,
+          Math.min(2, Math.round(options.octaveShiftsByPart[staffMeta.staffId] ?? 0))
+        );
+      } else if (!multipleInstrumentsActive && staffMeta.staffId === activeStaff.staffId) {
+        partOctaveForThisStaff = clampedOctaveShift;
+      }
+    }
+    const staffPitchDelta = semitoneShift + partOctaveForThisStaff * 12;
+
     const noteNodes = staffBody.getElementsByTagName('Note');
-    const applyOctaveToThisStaff =
-      sid === activeStaff.staffId || (isFullScore && sIdx === 0);
-    const staffPitchDelta =
-      semitoneShift + (applyOctaveToThisStaff ? manualOctaveSemitones : 0);
-
     for (let i = 0; i < noteNodes.length; i++) {
       const noteNode = noteNodes.item(i)!;
       const origPitch = parseInt(getDirectChildText(noteNode, 'pitch', '60'), 10);
@@ -1601,11 +2002,12 @@ export function transformScoreXml(
       removeDirectChildrenByTag(noteNode, 'Accidental');
     }
 
-    // 6c. Processar Cifras (<Harmony>) e Edições de Cifras Existentes
-    const measures = getDirectChildrenByTag(staffBody, 'Measure');
-    const isTransposingStaff = staffWrittenSemitoneOffset !== 0;
-    const shouldTransposeVisibleChordsToInstrument =
-      isTransposingStaff && options.convertBbEbChordsToWritten;
+    // 6c. Processar Cifras (<Harmony>) e Edições de Cifras Existentes em todas as pautas
+    const shouldTransposeVisibleChordsToInstrument = Boolean(
+      allowGlobalWrittenChords &&
+        staffMeta?.isTransposing &&
+        options.convertBbEbChordsToWritten
+    );
 
     const chordSemitoneDelta =
       semitoneShift +
@@ -1615,7 +2017,7 @@ export function transformScoreXml(
       : newConcertKeyFifths;
 
     let staffHarmonyIdx = 0;
-    measures.forEach((mEl, mIdx) => {
+    staffMeasures.forEach((mEl, mIdx) => {
       const mHarmonies = Array.from(mEl.getElementsByTagName('Harmony'));
       for (const hNode of mHarmonies) {
         if (!options.showChords && isThisStaffActive) {
@@ -1660,11 +2062,12 @@ export function transformScoreXml(
               finalBaseTpc
             );
 
-            // Verificar se o usuário editou esta cifra (por ocorrência #idx ou pelo nome do acorde)
+            const occKey = `#${sid}:${staffHarmonyIdx}`;
+            const legacyOccKey = `#${staffHarmonyIdx}`;
             const overrideByOccurrence =
-              options.chordOverrides?.[`#${staffHarmonyIdx}`];
-            const overrideBySymbol =
-              options.chordOverrides?.[autoTransposedSymbol];
+              options.chordOverrides?.[occKey] ??
+              (sid === activeStaff.staffId ? options.chordOverrides?.[legacyOccKey] : undefined);
+            const overrideBySymbol = options.chordOverrides?.[autoTransposedSymbol];
             const chosenOverride = overrideByOccurrence || overrideBySymbol;
 
             if (chosenOverride) {
@@ -1695,12 +2098,14 @@ export function transformScoreXml(
               finalBaseTpc
             );
 
-            if (sid === activeStaff.staffId) {
+            if (isThisStaffActive) {
               if (!previewChords.includes(finalDisplaySymbol)) {
                 previewChords.push(finalDisplaySymbol);
               }
               chordOccurrences.push({
                 occurrenceIndex: staffHarmonyIdx,
+                occurrenceKey: occKey,
+                staffId: sid,
                 measureNumber: mIdx + 1,
                 originalSymbol: autoTransposedSymbol,
                 currentSymbol: finalDisplaySymbol,

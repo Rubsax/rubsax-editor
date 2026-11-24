@@ -40,9 +40,9 @@ function setCachedConvertedMscx(fileHash: string, mscx: string): void {
 }
 
 /**
- * Constrói o pacote .mscz estritamente restringido no servidor para usuários em `free_pass`:
- * ignora `modifiedMscx` enviado pelo cliente, permite exclusivamente transposição (-12..+12)
- * e oitava (-2..+2) e força quebra de compasso automática (sem `<LayoutBreak>` manuais).
+ * Constrói o pacote .mscz estritamente restringido no servidor para usuários em `preview` e `free_pass`:
+ * ignora `modifiedMscx` enviado pelo cliente, permite exclusivamente transposição (-12..+12),
+ * oitava (-2..+2), quebra de compasso e quebra de página na 1ª parte (incluindo pauta dupla de Piano).
  */
 export async function buildFreePassRestrictedMsczBuffer(params: {
   rawBuffer: Buffer;
@@ -50,13 +50,24 @@ export async function buildFreePassRestrictedMsczBuffer(params: {
   fileHash: string;
   semitoneShift?: number;
   octaveShift?: number;
+  lineBreakMeasures?: number[];
+  pageBreakMeasures?: number[];
   isDev?: boolean;
 }): Promise<{
   msczBuffer: Buffer;
   transformed: TransformResult;
   analysis: ScoreAnalysis;
 }> {
-  const { rawBuffer, fileName, fileHash, semitoneShift, octaveShift, isDev } = params;
+  const {
+    rawBuffer,
+    fileName,
+    fileHash,
+    semitoneShift,
+    octaveShift,
+    lineBreakMeasures,
+    pageBreakMeasures,
+    isDev,
+  } = params;
   const validation = validateUploadFileName(fileName);
   const ext = validation.extension;
 
@@ -78,13 +89,28 @@ export async function buildFreePassRestrictedMsczBuffer(params: {
   const unpacked = await unpackScoreBuffer(rawBuffer, fileName, serverConvertedMscx);
   const analysis = analyzeScoreXml(unpacked.mscxContent, fileName, unpacked.fileFormat);
 
+  const sanitizeBreaks = (raw?: number[]): number[] => {
+    if (!Array.isArray(raw)) return [];
+    const unique = new Set<number>();
+    for (const item of raw) {
+      const n = Math.round(Number(item));
+      if (Number.isFinite(n) && n >= 1 && n <= analysis.measureCount) {
+        unique.add(n);
+      }
+    }
+    return Array.from(unique).sort((a, b) => a - b);
+  };
+
   const safeSemitoneShift = Math.max(-12, Math.min(12, Math.round(semitoneShift ?? 0)));
   const safeOctaveShift = Math.max(-2, Math.min(2, Math.round(octaveShift ?? 0)));
+  const safeLineBreakMeasures = sanitizeBreaks(lineBreakMeasures);
+  const safePageBreakMeasures = sanitizeBreaks(pageBreakMeasures);
   const firstStaffId = analysis.staves[0]?.staffId || '1';
 
   const transformed = transformScoreXml(unpacked.mscxContent, analysis, {
     semitoneShift: safeSemitoneShift,
     octaveShift: safeOctaveShift,
+    octaveShiftsByPart: { [firstStaffId]: safeOctaveShift },
     targetInstrumentId: analysis.detectedInstrumentId,
     selectedStaffId: firstStaffId,
     selectedStaffIds: [firstStaffId],
@@ -95,7 +121,8 @@ export async function buildFreePassRestrictedMsczBuffer(params: {
     headers: analysis.headers,
     chordOverrides: {},
     floatingTexts: [],
-    lineBreakMeasures: [],
+    lineBreakMeasures: safeLineBreakMeasures,
+    pageBreakMeasures: safePageBreakMeasures,
     staffScalePercent: 100,
   });
 

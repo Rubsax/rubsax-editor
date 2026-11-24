@@ -35,8 +35,17 @@ import PlansModal, { type PlanCheckoutKind } from './PlansModal';
 import AccountModal from './AccountModal';
 import TutorialModal from './TutorialModal';
 import { extractYouTubeVideoId, getYouTubeEmbedUrl, getYouTubeWatchUrl } from '@/lib/youtube';
-import { loadWorkspaceSession, saveWorkspaceSession } from '@/lib/workspace-storage';
+import {
+  type SavedWorkspaceSession,
+  deleteRecentProject,
+  getActiveTabProjectHash,
+  loadRecentProjects,
+  saveWorkspaceSession,
+  setActiveTabProjectHash,
+} from '@/lib/workspace-storage';
 import { recordInternalRoute } from '@/lib/nav-history';
+import { useAuth } from './AuthProvider';
+import FreePassCountdown from './FreePassCountdown';
 import {
   Upload,
   FileDown,
@@ -74,16 +83,29 @@ import {
   Music,
   ExternalLink,
   HelpCircle,
+  ChevronDown,
+  Clock,
+  CreditCard,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 const LOCKED_PRO_BANNER_TEXT =
-  'Recurso PRO (Avulso ou Mensal) • O Modo Gratuito libera apenas Transposição & Oitava';
+  'Recurso PRO (Avulso ou Mensal) • O Modo Gratuito libera Transposição, Oitava e Quebras';
 
-type TransposeDirectionMode = 'closest' | 'up' | 'down';
 type SystemBreakMode = 'initial' | 'auto' | 'every-x' | 'custom';
 type MobileTabId = 'transpose' | 'display' | 'headers' | 'layout' | 'staves';
 
 const STAFF_SCALE_PILLS = [80, 85, 90, 95, 100, 105, 110] as const;
+
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(() => setTimeout(resolve, 0));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = '';
@@ -96,26 +118,53 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
 export default function RubsaxWorkspace() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const {
+    user: ctxAuthUser,
+    isDev: ctxIsDev,
+    accessLevel: ctxAccessLevel,
+    activeSubscription: ctxActiveSubscription,
+    activeSingleUnlocks: ctxActiveSingleUnlocks,
+    freePassStatus: ctxFreePassStatus,
+    settings: ctxAppSettings,
+    refreshAuth,
+    setAuthUserImmediate,
+    clearAuthSession,
+  } = useAuth();
 
   // Aceite obrigatório de Direitos Autorais (persistido em localStorage)
   const [copyrightAccepted, setCopyrightAccepted] = useState<boolean>(false);
   const [copyrightError, setCopyrightError] = useState<boolean>(false);
 
-  // Sessão Auth, Modo Dev, Configurações Dinâmicas & Controle de Acesso
-  const [authUser, setAuthUser] = useState<ClientAuthUser | null>(null);
-  const [isDev, setIsDev] = useState<boolean>(false);
-  const [accessLevel, setAccessLevel] = useState<AccessLevel>('preview');
-  const [activeSubscription, setActiveSubscription] = useState<SubscriptionRow | null>(null);
-  const [activeSingleUnlocks, setActiveSingleUnlocks] = useState<SingleUnlockRow[]>([]);
-  const [freePassStatus, setFreePassStatus] = useState<FreePassStatus | null>(null);
+  // Sessão Auth, Modo Dev, Configurações Dinâmicas & Controle de Acesso (já hidratados no servidor via AuthProvider)
+  const [authUser, setAuthUser] = useState<ClientAuthUser | null>(ctxAuthUser);
+  const [isDev, setIsDev] = useState<boolean>(ctxIsDev);
+  const [accessLevel, setAccessLevel] = useState<AccessLevel>(ctxAccessLevel);
+  const [activeSubscription, setActiveSubscription] = useState<SubscriptionRow | null>(
+    ctxActiveSubscription
+  );
+  const [activeSingleUnlocks, setActiveSingleUnlocks] = useState<SingleUnlockRow[]>(
+    ctxActiveSingleUnlocks
+  );
+  const [freePassStatus, setFreePassStatus] = useState<FreePassStatus | null>(
+    ctxFreePassStatus
+  );
   const [isClaimingFreePass, setIsClaimingFreePass] = useState<boolean>(false);
   const [freePassError, setFreePassError] = useState<string | null>(null);
   const [plansModalReason, setPlansModalReason] = useState<'fullscreen' | 'pro' | 'default'>(
     'default'
   );
-  const [appSettings, setAppSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
+  const [appSettings, setAppSettings] = useState<AppSettings>(ctxAppSettings);
   const [fileHash, setFileHash] = useState<string>('');
   const [viewerPreviewState, setViewerPreviewState] = useState<{
     isPreview: boolean;
@@ -131,16 +180,20 @@ export default function RubsaxWorkspace() {
   const [pendingPlanIntent, setPendingPlanIntent] =
     useState<PlanCheckoutKind | null>(null);
 
-  // Separação entre Tela Inicial ('welcome') e Área do Editor ('editor') + Motivo do Loading
+  // Separação entre Tela Inicial ('welcome') e Área do Editor ('editor') + Projetos Recentes sob demanda
   const [workspaceView, setWorkspaceView] = useState<'welcome' | 'editor'>('welcome');
   const [loadingReason, setLoadingReason] = useState<ScoreLoadingReason>('initial');
   const [isRestoringSession, setIsRestoringSession] = useState<boolean>(true);
+  const [recentProjects, setRecentProjects] = useState<SavedWorkspaceSession[]>([]);
+  const [openingRecentHash, setOpeningRecentHash] = useState<string | null>(null);
 
   const fileHashRef = useRef<string>('');
-  const accessLevelRef = useRef<AccessLevel>('preview');
+  const accessLevelRef = useRef<AccessLevel>(ctxAccessLevel);
   const analysisRef = useRef<ScoreAnalysis | null>(null);
   const hasExplicitViewChoiceRef = useRef<boolean>(false);
   const isSessionHydratedRef = useRef<boolean>(false);
+  const isUploadingLockRef = useRef<boolean>(false);
+  const isExportingLockRef = useRef<boolean>(false);
 
   const tutorialVideoId = useMemo(() => {
     if (!appSettings.tutorial?.enabled) return null;
@@ -164,9 +217,8 @@ export default function RubsaxWorkspace() {
 
   // Transform controls state (atualizados sincronamente em 0ms)
   const [semitoneShift, setSemitoneShift] = useState<number>(0);
-  const [transposeDirection, setTransposeDirection] =
-    useState<TransposeDirectionMode>('closest');
-  const [octaveShift, setOctaveShift] = useState<number>(0);
+  const [octaveShiftsByPart, setOctaveShiftsByPart] = useState<Record<string, number>>({});
+  const [octaveBlockedWarning, setOctaveBlockedWarning] = useState<boolean>(false);
   const [targetInstrumentId, setTargetInstrumentId] = useState<string>('alto-sax');
   const [selectedStaffIds, setSelectedStaffIds] = useState<string[]>(['1']);
   const [viewMode, setViewMode] = useState<ScoreLayoutViewMode>('portrait');
@@ -181,18 +233,39 @@ export default function RubsaxWorkspace() {
     composer: { text: '', visible: true, removed: false, autoSyncInstrument: true },
     lyricist: { text: '', visible: true, removed: false, autoSyncPianoKey: true },
   });
+  const [headerDrafts, setHeaderDrafts] = useState<{
+    title: string;
+    subtitle: string;
+    composer: string;
+    lyricist: string;
+  }>({
+    title: '',
+    subtitle: '',
+    composer: '',
+    lyricist: '',
+  });
 
-  // Quebra de Compasso (Sistema) e Tamanho da Pauta (Escala <Spatium>)
+  // Quebras (Compasso e Página em subgavetas retráteis) e Tamanho da Pauta (Escala <Spatium>)
   const [lineBreakMeasures, setLineBreakMeasures] = useState<number[]>([]);
+  const [pageBreakMeasures, setPageBreakMeasures] = useState<number[]>([]);
   const [systemBreakMode, setSystemBreakMode] = useState<SystemBreakMode>('initial');
   const [measuresPerLineInput, setMeasuresPerLineInput] = useState<number>(4);
+  const [selectedPageBreakMeasureInput, setSelectedPageBreakMeasureInput] = useState<number>(1);
+  const [openSystemAccordions, setOpenSystemAccordions] = useState<{
+    line: boolean;
+    page: boolean;
+  }>({
+    line: true,
+    page: false,
+  });
   const [staffScalePercent, setStaffScalePercent] = useState<number>(100);
 
-  // Edição de Cifras Existentes & Caixas de Texto Flutuantes
+  // Edição de Cifras Existentes (duas caixas simultâneas) & Caixas de Texto Flutuantes
   const [chordOverrides, setChordOverrides] = useState<Record<string, string>>({});
-  const [editingChordKey, setEditingChordKey] = useState<string | null>(null);
-  const [editingChordValue, setEditingChordValue] = useState<string>('');
-  const [chordEditMode, setChordEditMode] = useState<'symbol' | 'occurrence'>('symbol');
+  const [selectedChordSymbol, setSelectedChordSymbol] = useState<string | null>(null);
+  const [globalChordInput, setGlobalChordInput] = useState<string>('');
+  const [selectedOccurrenceKey, setSelectedOccurrenceKey] = useState<string>('');
+  const [measureChordInput, setMeasureChordInput] = useState<string>('');
   const [floatingTexts, setFloatingTexts] = useState<FloatingTextBox[]>([]);
 
   // Optimistic UI & Async Transform / SVG Status
@@ -230,33 +303,20 @@ export default function RubsaxWorkspace() {
     ) => {
       try {
         const effectiveHash = hashToCheck ?? fileHashRef.current;
-        const qs = effectiveHash ? `?fileHash=${encodeURIComponent(effectiveHash)}` : '';
-        const res = await fetch(`/api/auth/me${qs}`, { cache: 'no-store' });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const prevLevel = accessLevelRef.current;
-        const nextLevel: AccessLevel = data.access?.level || 'preview';
+        const payload = await refreshAuth(effectiveHash || undefined);
+        if (!payload) return null;
 
-        setAuthUser(data.user || null);
-        setIsDev(Boolean(data.isDev));
+        const prevLevel = accessLevelRef.current;
+        const nextLevel: AccessLevel = payload.accessLevel || 'preview';
+
+        setAuthUser(payload.user);
+        setIsDev(payload.isDev);
         accessLevelRef.current = nextLevel;
         setAccessLevel(nextLevel);
-        setActiveSubscription(data.activeSubscription || null);
-        setActiveSingleUnlocks(data.activeSingleUnlocks || []);
-        setFreePassStatus(data.freePassStatus || null);
-
-        if (data.settings) {
-          setAppSettings((prev) => ({
-            ...prev,
-            pricing: data.settings.pricing || prev.pricing,
-            paywall: data.settings.paywall || prev.paywall,
-            announcement: data.settings.announcement || prev.announcement,
-            operations: { ...prev.operations, ...(data.settings.operations || {}) },
-            support_links: data.settings.support_links || prev.support_links,
-            tutorial: { ...prev.tutorial, ...(data.settings.tutorial || {}) },
-            free_pass: { ...prev.free_pass, ...(data.settings.free_pass || {}) },
-          }));
-        }
+        setActiveSubscription(payload.activeSubscription);
+        setActiveSingleUnlocks(payload.activeSingleUnlocks);
+        setFreePassStatus(payload.freePassStatus);
+        setAppSettings(payload.settings);
 
         const accessChanged = prevLevel !== nextLevel;
 
@@ -269,12 +329,12 @@ export default function RubsaxWorkspace() {
           setRenderVersion((v) => v + 1);
         }
 
-        return data;
+        return payload;
       } catch {
         return null;
       }
     },
-    []
+    [refreshAuth]
   );
 
   const handleClaimFreePass = useCallback(async () => {
@@ -301,10 +361,6 @@ export default function RubsaxWorkspace() {
         return;
       }
 
-      // Alinha visualmente as quebras automáticas no cliente sem disparar duplo render
-      skipNextAutoTransformRef.current = true;
-      setLineBreakMeasures([]);
-      setSystemBreakMode('auto');
       setPlansModalOpen(false);
       setLoadingReason('unlocking');
       await refreshAuthAndSettings(fileHashRef.current, 'force');
@@ -313,7 +369,174 @@ export default function RubsaxWorkspace() {
     }
   }, [isClaimingFreePass, refreshAuthAndSettings]);
 
-  // Bootstrap inicial: restaura localStorage, sessão salva no IndexedDB e autenticação do usuário
+  const restoreSessionObject = useCallback(
+    async (
+      savedSession: SavedWorkspaceSession,
+      options?: { switchToEditor?: boolean; markActiveTab?: boolean }
+    ) => {
+      const lowerName = savedSession.fileName.toLowerCase();
+      const resolvedFormat: 'mscz' | 'mscx' | 'xml' | 'mxl' =
+        savedSession.fileFormat ||
+        (lowerName.endsWith('.mscx')
+          ? 'mscx'
+          : lowerName.endsWith('.mxl')
+          ? 'mxl'
+          : lowerName.endsWith('.xml') || lowerName.endsWith('.musicxml')
+          ? 'xml'
+          : 'mscz');
+
+      const restoredAnalysis = analyzeScoreXml(
+        savedSession.originalMscx,
+        savedSession.fileName,
+        resolvedFormat
+      );
+
+      const mappedRestoredIds = (savedSession.selectedStaffIds || [])
+        .map((id) => {
+          const found = restoredAnalysis.staves.find(
+            (s) => s.staffId === id || s.xmlStaffIds.includes(id)
+          );
+          return found ? found.staffId : null;
+        })
+        .filter((id): id is string => Boolean(id));
+
+      const dedupedIds = Array.from(new Set(mappedRestoredIds));
+      const restoredStaffIds: string[] =
+        dedupedIds.length > 0
+          ? dedupedIds
+          : [restoredAnalysis.staves[0]?.staffId || '1'];
+
+      const restoredOctaveMap: Record<string, number> =
+        savedSession.octaveShiftsByPart && typeof savedSession.octaveShiftsByPart === 'object'
+          ? { ...savedSession.octaveShiftsByPart }
+          : savedSession.octaveShift
+          ? { [restoredStaffIds[0] || '1']: savedSession.octaveShift }
+          : {};
+
+      const restoredLineBreaks =
+        savedSession.lineBreakMeasures !== undefined
+          ? savedSession.lineBreakMeasures
+          : restoredAnalysis.initialLineBreakMeasures;
+      const restoredPageBreaks =
+        savedSession.pageBreakMeasures !== undefined
+          ? savedSession.pageBreakMeasures
+          : restoredAnalysis.initialPageBreakMeasures;
+
+      const restoredHeaders = savedSession.headers || restoredAnalysis.headers;
+      const restoredOptions: ScoreTransformOptions = {
+        semitoneShift: savedSession.semitoneShift ?? 0,
+        octaveShift: restoredOctaveMap[restoredStaffIds[0] || '1'] ?? 0,
+        octaveShiftsByPart: restoredOctaveMap,
+        targetInstrumentId:
+          savedSession.targetInstrumentId || restoredAnalysis.detectedInstrumentId,
+        selectedStaffId: restoredStaffIds[0] || '1',
+        selectedStaffIds: restoredStaffIds,
+        viewMode: savedSession.viewMode || 'portrait',
+        convertBbEbChordsToWritten: Boolean(savedSession.convertBbEbChordsToWritten),
+        showChords: savedSession.showChords ?? true,
+        showLyrics: savedSession.showLyrics ?? true,
+        headers: restoredHeaders,
+        chordOverrides: savedSession.chordOverrides || {},
+        floatingTexts: [],
+        lineBreakMeasures: restoredLineBreaks,
+        pageBreakMeasures: restoredPageBreaks,
+        staffScalePercent: savedSession.staffScalePercent ?? 100,
+      };
+
+      const restoredTransform = transformScoreXml(
+        savedSession.originalMscx,
+        restoredAnalysis,
+        restoredOptions
+      );
+
+      const restoredHash =
+        savedSession.fileHash ||
+        (await computeFileSha256Hex(base64ToArrayBuffer(savedSession.originalBase64)));
+
+      skipNextAutoTransformRef.current = true;
+      setFileHash(restoredHash);
+      fileHashRef.current = restoredHash;
+      if (options?.markActiveTab !== false) {
+        setActiveTabProjectHash(restoredHash || `name:${savedSession.fileName}`);
+      }
+      setOriginalBase64(savedSession.originalBase64);
+      setOriginalMscx(savedSession.originalMscx);
+      setAnalysis(restoredAnalysis);
+      analysisRef.current = restoredAnalysis;
+
+      setSemitoneShift(restoredOptions.semitoneShift);
+      setOctaveShiftsByPart(restoredOctaveMap);
+      setOctaveBlockedWarning(false);
+      setTargetInstrumentId(restoredOptions.targetInstrumentId);
+      setSelectedStaffIds(restoredStaffIds);
+      setViewMode(restoredOptions.viewMode);
+      setConvertBbEbChordsToWritten(restoredOptions.convertBbEbChordsToWritten);
+      setShowChords(restoredOptions.showChords);
+      setShowLyrics(restoredOptions.showLyrics);
+      setHeaders(restoredHeaders);
+
+      const concertPc =
+        ((restoredAnalysis.originalConcertPitchClass + restoredOptions.semitoneShift) % 12 + 12) % 12;
+      const concertTon = getTonalityByPitchClass(concertPc);
+      const selectedParts = restoredAnalysis.staves.filter((s) =>
+        restoredStaffIds.includes(s.staffId)
+      );
+      const partLbl =
+        restoredOptions.viewMode === 'full-score' ||
+        (restoredAnalysis.staves.length > 1 &&
+          selectedParts.length === restoredAnalysis.staves.length)
+          ? 'Grade Completa'
+          : selectedParts.length > 1
+          ? selectedParts.map((s) => s.displayName).join(' + ')
+          : selectedParts[0]?.displayName || restoredAnalysis.detectedInstrumentName;
+
+      setHeaderDrafts({
+        title: restoredHeaders.title.text,
+        subtitle: restoredHeaders.subtitle.text,
+        composer: restoredHeaders.composer.autoSyncInstrument
+          ? partLbl
+          : restoredHeaders.composer.text,
+        lyricist: restoredHeaders.lyricist.autoSyncPianoKey
+          ? `Tom para Piano: ${concertTon.majorName}`
+          : restoredHeaders.lyricist.text,
+      });
+
+      setLineBreakMeasures(restoredLineBreaks);
+      setPageBreakMeasures(restoredPageBreaks);
+      setSelectedPageBreakMeasureInput(1);
+      setSystemBreakMode(
+        savedSession.systemBreakMode ||
+          (restoredLineBreaks.length > 0 ? 'initial' : 'auto')
+      );
+      setMeasuresPerLineInput(savedSession.measuresPerLineInput || 4);
+      setStaffScalePercent(restoredOptions.staffScalePercent || 100);
+      setChordOverrides(restoredOptions.chordOverrides);
+      setSelectedChordSymbol(null);
+      setGlobalChordInput('');
+      setSelectedOccurrenceKey('');
+      setMeasureChordInput('');
+      setFloatingTexts(savedSession.floatingTexts || []);
+      setCanvasTheme(savedSession.canvasTheme || 'parchment');
+      setTransformResult(restoredTransform);
+      renderedSnapshotMscxRef.current = restoredTransform.modifiedMscx;
+      setRenderedSnapshotMscx(restoredTransform.modifiedMscx);
+      setLoadingReason('initial');
+      setRenderVersion((v) => v + 1);
+
+      if (options?.switchToEditor) {
+        hasExplicitViewChoiceRef.current = true;
+        setWorkspaceView('editor');
+        if (typeof window !== 'undefined') {
+          window.history.replaceState(null, '', '/?view=editor');
+        }
+      }
+
+      return restoredHash;
+    },
+    []
+  );
+
+  // Bootstrap inicial: lê Projetos Recentes no IndexedDB (sem auto-renderizar ao entrar do zero!)
   useEffect(() => {
     let cancelled = false;
 
@@ -336,108 +559,39 @@ export default function RubsaxWorkspace() {
         // Ignora caso localStorage não esteja disponível
       }
 
-      const savedSession = await loadWorkspaceSession();
+      const recent = await loadRecentProjects();
       if (cancelled) return;
+      setRecentProjects(recent);
+
+      // Só restaura e renderiza automaticamente se esta aba já estava editando um projeto (F5 / fluxo de login)
+      const activeTabHash = getActiveTabProjectHash();
+      const matchingActiveProject = activeTabHash
+        ? recent.find(
+            (p) =>
+              p.fileHash === activeTabHash ||
+              `name:${p.fileName}` === activeTabHash
+          )
+        : undefined;
 
       let restoredHash = '';
-      if (savedSession) {
+      if (matchingActiveProject) {
         try {
-          const lowerName = savedSession.fileName.toLowerCase();
-          const resolvedFormat: 'mscz' | 'mscx' | 'xml' | 'mxl' =
-            savedSession.fileFormat ||
-            (lowerName.endsWith('.mscx')
-              ? 'mscx'
-              : lowerName.endsWith('.mxl')
-              ? 'mxl'
-              : lowerName.endsWith('.xml') || lowerName.endsWith('.musicxml')
-              ? 'xml'
-              : 'mscz');
-
-          const restoredAnalysis = analyzeScoreXml(
-            savedSession.originalMscx,
-            savedSession.fileName,
-            resolvedFormat
-          );
-          const validRestoredStaffIds = new Set(restoredAnalysis.staves.map((s) => s.staffId));
-          const filteredSavedStaffIds = (savedSession.selectedStaffIds || []).filter((id) =>
-            validRestoredStaffIds.has(id)
-          );
-          const restoredStaffIds: string[] =
-            filteredSavedStaffIds.length > 0
-              ? filteredSavedStaffIds
-              : [restoredAnalysis.staves[0]?.staffId || '1'];
-          const restoredOptions: ScoreTransformOptions = {
-            semitoneShift: savedSession.semitoneShift ?? 0,
-            octaveShift: savedSession.octaveShift ?? 0,
-            targetInstrumentId:
-              savedSession.targetInstrumentId || restoredAnalysis.detectedInstrumentId,
-            selectedStaffId: restoredStaffIds[0] || '1',
-            selectedStaffIds: restoredStaffIds,
-            viewMode: savedSession.viewMode || 'portrait',
-            convertBbEbChordsToWritten: Boolean(savedSession.convertBbEbChordsToWritten),
-            showChords: savedSession.showChords ?? true,
-            showLyrics: savedSession.showLyrics ?? true,
-            headers: savedSession.headers || restoredAnalysis.headers,
-            chordOverrides: savedSession.chordOverrides || {},
-            floatingTexts: [],
-            lineBreakMeasures:
-              savedSession.lineBreakMeasures || restoredAnalysis.initialLineBreakMeasures,
-            staffScalePercent: savedSession.staffScalePercent ?? 100,
-          };
-
-          const restoredTransform = transformScoreXml(
-            savedSession.originalMscx,
-            restoredAnalysis,
-            restoredOptions
-          );
-
-          restoredHash = savedSession.fileHash || '';
-          skipNextAutoTransformRef.current = true;
-          setFileHash(restoredHash);
-          fileHashRef.current = restoredHash;
-          setOriginalBase64(savedSession.originalBase64);
-          setOriginalMscx(savedSession.originalMscx);
-          setAnalysis(restoredAnalysis);
-          analysisRef.current = restoredAnalysis;
-
-          setSemitoneShift(restoredOptions.semitoneShift);
-          setOctaveShift(restoredOptions.octaveShift);
-          setTargetInstrumentId(restoredOptions.targetInstrumentId);
-          setSelectedStaffIds(restoredStaffIds);
-          setViewMode(restoredOptions.viewMode);
-          setConvertBbEbChordsToWritten(restoredOptions.convertBbEbChordsToWritten);
-          setShowChords(restoredOptions.showChords);
-          setShowLyrics(restoredOptions.showLyrics);
-          setHeaders(restoredOptions.headers);
-          setLineBreakMeasures(restoredOptions.lineBreakMeasures || []);
-          setSystemBreakMode(savedSession.systemBreakMode || 'initial');
-          setMeasuresPerLineInput(savedSession.measuresPerLineInput || 4);
-          setStaffScalePercent(restoredOptions.staffScalePercent || 100);
-          setChordOverrides(restoredOptions.chordOverrides);
-          setFloatingTexts(savedSession.floatingTexts || []);
-          setCanvasTheme(savedSession.canvasTheme || 'parchment');
-          setTransformResult(restoredTransform);
-          renderedSnapshotMscxRef.current = restoredTransform.modifiedMscx;
-          setRenderedSnapshotMscx(restoredTransform.modifiedMscx);
-          setLoadingReason('initial');
-          setRenderVersion((v) => v + 1);
-          if (urlView !== 'home' && !hasExplicitViewChoiceRef.current) {
-            setWorkspaceView('editor');
-          }
+          restoredHash = await restoreSessionObject(matchingActiveProject, {
+            switchToEditor: urlView !== 'home' && !hasExplicitViewChoiceRef.current,
+            markActiveTab: true,
+          });
         } catch {
-          // Sessão salva incompatível; ignora e segue limpo
+          setActiveTabProjectHash(null);
         }
-      } else if (urlView === 'editor' && !hasExplicitViewChoiceRef.current) {
-        setWorkspaceView('editor');
       }
 
-      const meData = await refreshAuthAndSettings(restoredHash, 'none');
+      await refreshAuthAndSettings(restoredHash, 'none');
       if (cancelled) return;
 
       if (!hasExplicitViewChoiceRef.current) {
         if (urlView === 'home') {
           setWorkspaceView('welcome');
-        } else if (urlView === 'editor' || savedSession || meData?.user) {
+        } else if (urlView === 'editor' || matchingActiveProject) {
           setWorkspaceView('editor');
         } else {
           setWorkspaceView('welcome');
@@ -452,7 +606,7 @@ export default function RubsaxWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [refreshAuthAndSettings]);
+  }, [refreshAuthAndSettings, restoreSessionObject]);
 
   // Registra navegação interna para o botão inteligente "Voltar"
   useEffect(() => {
@@ -460,12 +614,13 @@ export default function RubsaxWorkspace() {
     recordInternalRoute(workspaceView === 'editor' ? '/?view=editor' : '/?view=home');
   }, [workspaceView, isRestoringSession]);
 
-  // Auto-salva a partitura e edições atuais no IndexedDB para sobreviver a reloads (F5) e trocas de página
+  // Auto-salva a partitura e edições atuais na lista de Projetos Recentes do IndexedDB
   useEffect(() => {
     if (!isSessionHydratedRef.current || !analysis || !originalBase64 || !originalMscx) {
       return;
     }
     const timer = setTimeout(() => {
+      const primaryId = selectedStaffIds[0] || analysis.staves[0]?.staffId || '1';
       void saveWorkspaceSession({
         fileName: analysis.fileName,
         fileFormat: analysis.fileFormat,
@@ -473,7 +628,8 @@ export default function RubsaxWorkspace() {
         originalMscx,
         fileHash,
         semitoneShift,
-        octaveShift,
+        octaveShift: octaveShiftsByPart[primaryId] ?? 0,
+        octaveShiftsByPart,
         targetInstrumentId,
         selectedStaffIds,
         viewMode,
@@ -484,11 +640,14 @@ export default function RubsaxWorkspace() {
         chordOverrides,
         floatingTexts,
         lineBreakMeasures,
+        pageBreakMeasures,
         systemBreakMode,
         measuresPerLineInput,
         staffScalePercent,
         canvasTheme,
         savedAt: Date.now(),
+      }).then((updatedList) => {
+        setRecentProjects(updatedList);
       });
     }, 350);
     return () => clearTimeout(timer);
@@ -498,7 +657,7 @@ export default function RubsaxWorkspace() {
     originalMscx,
     fileHash,
     semitoneShift,
-    octaveShift,
+    octaveShiftsByPart,
     targetInstrumentId,
     selectedStaffIds,
     viewMode,
@@ -509,11 +668,58 @@ export default function RubsaxWorkspace() {
     chordOverrides,
     floatingTexts,
     lineBreakMeasures,
+    pageBreakMeasures,
     systemBreakMode,
     measuresPerLineInput,
     staffScalePercent,
     canvasTheme,
   ]);
+
+  const handleOpenRecentProject = useCallback(
+    async (project: SavedWorkspaceSession) => {
+      const key = project.fileHash || `name:${project.fileName}`;
+      if (openingRecentHash || isLoadingFile) return;
+      setUploadError(null);
+      setOpeningRecentHash(key);
+      try {
+        await yieldToMainThread();
+        const restoredHash = await restoreSessionObject(project, {
+          switchToEditor: true,
+          markActiveTab: true,
+        });
+        await refreshAuthAndSettings(restoredHash, 'if-access-changed');
+      } catch {
+        setUploadError('Não foi possível reabrir este projeto salvo.');
+      } finally {
+        setOpeningRecentHash(null);
+      }
+    },
+    [isLoadingFile, openingRecentHash, refreshAuthAndSettings, restoreSessionObject]
+  );
+
+  const handleDeleteRecentProject = useCallback(async (project: SavedWorkspaceSession) => {
+    const key = project.fileHash || `name:${project.fileName}`;
+    const updated = await deleteRecentProject(key);
+    setRecentProjects(updated);
+    if (getActiveTabProjectHash() === key || getActiveTabProjectHash() === project.fileHash) {
+      setActiveTabProjectHash(null);
+    }
+  }, []);
+
+  const handleCloseCurrentScore = useCallback(() => {
+    setActiveTabProjectHash(null);
+    setAnalysis(null);
+    analysisRef.current = null;
+    setOriginalBase64('');
+    setOriginalMscx('');
+    setFileHash('');
+    fileHashRef.current = '';
+    setTransformResult(null);
+    renderedSnapshotMscxRef.current = '';
+    setRenderedSnapshotMscx('');
+    setSelectedChordSymbol(null);
+    setOctaveBlockedWarning(false);
+  }, []);
 
   const handleGoWelcome = useCallback(() => {
     hasExplicitViewChoiceRef.current = true;
@@ -536,6 +742,7 @@ export default function RubsaxWorkspace() {
     setUserMenuOpen(false);
     setAccountModalOpen(false);
     await signOutUser();
+    clearAuthSession();
     setAuthUser(null);
     setIsDev(false);
     accessLevelRef.current = 'preview';
@@ -548,7 +755,7 @@ export default function RubsaxWorkspace() {
       setLoadingReason('logout');
       setRenderVersion((v) => v + 1);
     }
-  }, []);
+  }, [clearAuthSession]);
 
   const handleToggleDevBadgeHidden = () => {
     setDevBadgeHidden((prev) => {
@@ -606,6 +813,7 @@ export default function RubsaxWorkspace() {
 
   const loadScoreFromBuffer = useCallback(
     async (arrayBuf: ArrayBuffer, fileName: string) => {
+      if (isUploadingLockRef.current) return;
       setUploadError(null);
       if (appSettings.operations.maintenance_mode && !isDev) {
         setUploadError(
@@ -621,8 +829,10 @@ export default function RubsaxWorkspace() {
         return;
       }
 
+      isUploadingLockRef.current = true;
       setIsLoadingFile(true);
       try {
+        await yieldToMainThread();
         const computedHash = await computeFileSha256Hex(arrayBuf);
         setFileHash(computedHash);
         fileHashRef.current = computedHash;
@@ -633,12 +843,12 @@ export default function RubsaxWorkspace() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             consentType: 'copyright_upload',
-            termsVersion: 'v1.3',
+            termsVersion: 'v1.4',
             fileHash: computedHash,
           }),
         }).catch(() => {});
 
-        void refreshAuthAndSettings(computedHash, 'none');
+        const authPromise = refreshAuthAndSettings(computedHash, 'none');
 
         const b64 = arrayBufferToBase64(arrayBuf);
         let serverConvertedMscx: string | undefined;
@@ -680,10 +890,25 @@ export default function RubsaxWorkspace() {
           unpacked.fileFormat
         );
 
+        const mePayload = await authPromise;
+        const resolvedLevel = mePayload?.accessLevel || accessLevelRef.current;
+        const startInAutoBreakMode =
+          !isDev &&
+          appSettings.paywall.paywall_enabled !== false &&
+          (resolvedLevel === 'preview' || resolvedLevel === 'free_pass');
+
+        const defaultLineBreaks = startInAutoBreakMode
+          ? []
+          : scoreAnalysis.initialLineBreakMeasures;
+        const defaultPageBreaks = startInAutoBreakMode
+          ? []
+          : scoreAnalysis.initialPageBreakMeasures;
+
         const firstStaffId = scoreAnalysis.staves[0]?.staffId || '1';
         const initialOptions: ScoreTransformOptions = {
           semitoneShift: 0,
           octaveShift: 0,
+          octaveShiftsByPart: {},
           targetInstrumentId: scoreAnalysis.detectedInstrumentId,
           selectedStaffId: firstStaffId,
           selectedStaffIds: [firstStaffId],
@@ -694,7 +919,8 @@ export default function RubsaxWorkspace() {
           headers: scoreAnalysis.headers,
           chordOverrides: {},
           floatingTexts: [],
-          lineBreakMeasures: scoreAnalysis.initialLineBreakMeasures,
+          lineBreakMeasures: defaultLineBreaks,
+          pageBreakMeasures: defaultPageBreaks,
           staffScalePercent: 100,
         };
 
@@ -705,12 +931,15 @@ export default function RubsaxWorkspace() {
         );
 
         skipNextAutoTransformRef.current = true;
+        setActiveTabProjectHash(computedHash || `name:${fileName}`);
         setOriginalBase64(b64);
         setOriginalMscx(unpacked.mscxContent);
         setAnalysis(scoreAnalysis);
+        analysisRef.current = scoreAnalysis;
 
         setSemitoneShift(0);
-        setOctaveShift(0);
+        setOctaveShiftsByPart({});
+        setOctaveBlockedWarning(false);
         setTargetInstrumentId(scoreAnalysis.detectedInstrumentId);
         setSelectedStaffIds([firstStaffId]);
         setViewMode('portrait');
@@ -718,14 +947,31 @@ export default function RubsaxWorkspace() {
         setShowChords(true);
         setShowLyrics(true);
         setHeaders(scoreAnalysis.headers);
-        setLineBreakMeasures(scoreAnalysis.initialLineBreakMeasures);
-        setSystemBreakMode(
-          scoreAnalysis.initialLineBreakMeasures.length > 0 ? 'initial' : 'auto'
-        );
+
+        const firstPartDisplay =
+          scoreAnalysis.staves[0]?.displayName || scoreAnalysis.detectedInstrumentName;
+        setHeaderDrafts({
+          title: scoreAnalysis.headers.title.text,
+          subtitle: scoreAnalysis.headers.subtitle.text,
+          composer: scoreAnalysis.headers.composer.autoSyncInstrument
+            ? firstPartDisplay
+            : scoreAnalysis.headers.composer.text,
+          lyricist: scoreAnalysis.headers.lyricist.autoSyncPianoKey
+            ? `Tom para Piano: ${scoreAnalysis.originalConcertTonality.majorName}`
+            : scoreAnalysis.headers.lyricist.text,
+        });
+
+        setLineBreakMeasures(defaultLineBreaks);
+        setPageBreakMeasures(defaultPageBreaks);
+        setSelectedPageBreakMeasureInput(1);
+        setSystemBreakMode(defaultLineBreaks.length > 0 ? 'initial' : 'auto');
         setMeasuresPerLineInput(4);
         setStaffScalePercent(100);
         setChordOverrides({});
-        setEditingChordKey(null);
+        setSelectedChordSymbol(null);
+        setGlobalChordInput('');
+        setSelectedOccurrenceKey('');
+        setMeasureChordInput('');
         setFloatingTexts([]);
         setActiveActionId(null);
         setIsTransformComputing(false);
@@ -746,10 +992,17 @@ export default function RubsaxWorkspace() {
           err instanceof Error ? err.message : UNSUPPORTED_FORMAT_MESSAGE;
         setUploadError(msg);
       } finally {
+        isUploadingLockRef.current = false;
         setIsLoadingFile(false);
       }
     },
-    [appSettings.operations.maintenance_message, appSettings.operations.maintenance_mode, isDev, refreshAuthAndSettings]
+    [
+      appSettings.operations.maintenance_message,
+      appSettings.operations.maintenance_mode,
+      appSettings.paywall.paywall_enabled,
+      isDev,
+      refreshAuthAndSettings,
+    ]
   );
 
   const handleFileUpload = useCallback(
@@ -772,50 +1025,122 @@ export default function RubsaxWorkspace() {
     if (!analysis || isSvgLoading) return;
     const origPc = analysis.originalConcertPitchClass;
     const rawDiff = (((targetPc - origPc) % 12) + 12) % 12;
-
-    let shift = rawDiff;
-    if (transposeDirection === 'closest') {
-      if (rawDiff > 6) shift = rawDiff - 12;
-    } else if (transposeDirection === 'up') {
-      shift = rawDiff;
-    } else if (transposeDirection === 'down') {
-      shift = rawDiff === 0 ? 0 : rawDiff - 12;
-    }
+    // Sempre menor distância ("Mais Próximo")
+    const shift = rawDiff > 6 ? rawDiff - 12 : rawDiff;
     if (shift === semitoneShift) return;
     scheduleScoreAction('tonality-select', 60);
     setSemitoneShift(shift);
   };
 
+  const areProDrawersLocked =
+    !isDev &&
+    appSettings.paywall.paywall_enabled !== false &&
+    (accessLevel === 'preview' || accessLevel === 'free_pass');
+
+  const firstVisibleStaffId = analysis?.staves[0]?.staffId || '1';
+  const effectiveViewMode: ScoreLayoutViewMode = areProDrawersLocked ? 'portrait' : viewMode;
+  const effectiveSelectedStaffIds = useMemo(
+    () => (areProDrawersLocked ? [firstVisibleStaffId] : selectedStaffIds),
+    [areProDrawersLocked, firstVisibleStaffId, selectedStaffIds]
+  );
+
+  // Cálculo instantâneo de 0ms em memória pura para partes & tonalidades exibidas no visor
+  const activeInstrument = useMemo(
+    () => getInstrumentById(targetInstrumentId),
+    [targetInstrumentId]
+  );
+
+  const selectedStavesList = useMemo(() => {
+    if (!analysis) return [];
+    const effectiveIds =
+      effectiveViewMode === 'full-score'
+        ? analysis.staves.map((s) => s.staffId)
+        : effectiveSelectedStaffIds;
+    return analysis.staves.filter((s) => effectiveIds.includes(s.staffId));
+  }, [analysis, effectiveSelectedStaffIds, effectiveViewMode]);
+
+  const multipleInstrumentsActive = Boolean(
+    analysis &&
+      (effectiveViewMode === 'full-score'
+        ? analysis.staves.length > 1
+        : selectedStavesList.length > 1)
+  );
+
+  useEffect(() => {
+    if (!multipleInstrumentsActive && octaveBlockedWarning) {
+      setOctaveBlockedWarning(false);
+    }
+  }, [multipleInstrumentsActive, octaveBlockedWarning]);
+
+  const activeStaffSummary = useMemo(() => {
+    if (!analysis) return null;
+    return selectedStavesList[0] || analysis.staves[0] || null;
+  }, [analysis, selectedStavesList]);
+
+  const activePartId = activeStaffSummary?.staffId || firstVisibleStaffId;
+  const currentPartOctaveShift = multipleInstrumentsActive
+    ? 0
+    : octaveShiftsByPart[activePartId] ?? 0;
+
+  // Transpositores universais na tela (oculto se só houver instrumentos em Dó; travado se mistura de afinações)
+  const pitchedActiveParts = useMemo(
+    () => selectedStavesList.filter((s) => !s.isPercussion),
+    [selectedStavesList]
+  );
+  const transposingActiveParts = useMemo(
+    () => pitchedActiveParts.filter((s) => s.isTransposing),
+    [pitchedActiveParts]
+  );
+  const hasAnyTransposingActive = transposingActiveParts.length > 0;
+  const uniqueWrittenOffsetsActive = useMemo(
+    () => new Set(pitchedActiveParts.map((s) => s.writtenSemitoneOffset)),
+    [pitchedActiveParts]
+  );
+  const isMixedTransposition =
+    hasAnyTransposingActive && uniqueWrittenOffsetsActive.size > 1;
+  const detectedTuningLabel =
+    !isMixedTransposition && transposingActiveParts[0]
+      ? transposingActiveParts[0].transpositionLabel
+      : 'Transpositor';
+  const effectiveConvertChordsToWritten = Boolean(
+    convertBbEbChordsToWritten && hasAnyTransposingActive && !isMixedTransposition
+  );
+
   // Opções para a visualização em tela (sem duplicar textos flutuantes que já são arrastáveis na tela)
   const screenTransformOptions: ScoreTransformOptions = useMemo(
     () => ({
       semitoneShift,
-      octaveShift,
+      octaveShift: currentPartOctaveShift,
+      octaveShiftsByPart,
       targetInstrumentId,
-      selectedStaffId: selectedStaffIds[0] || '1',
-      selectedStaffIds,
-      viewMode,
-      convertBbEbChordsToWritten,
+      selectedStaffId: effectiveSelectedStaffIds[0] || firstVisibleStaffId,
+      selectedStaffIds: effectiveSelectedStaffIds,
+      viewMode: effectiveViewMode,
+      convertBbEbChordsToWritten: effectiveConvertChordsToWritten,
       showChords,
       showLyrics,
       headers,
       chordOverrides,
       floatingTexts: [],
       lineBreakMeasures,
+      pageBreakMeasures,
       staffScalePercent,
     }),
     [
       semitoneShift,
-      octaveShift,
+      currentPartOctaveShift,
+      octaveShiftsByPart,
       targetInstrumentId,
-      selectedStaffIds,
-      viewMode,
-      convertBbEbChordsToWritten,
+      effectiveSelectedStaffIds,
+      firstVisibleStaffId,
+      effectiveViewMode,
+      effectiveConvertChordsToWritten,
       showChords,
       showLyrics,
       headers,
       chordOverrides,
       lineBreakMeasures,
+      pageBreakMeasures,
       staffScalePercent,
     ]
   );
@@ -829,26 +1154,6 @@ export default function RubsaxWorkspace() {
     [screenTransformOptions, floatingTexts]
   );
 
-  // Cálculo instantâneo de 0ms em memória pura para pautas & tonalidades exibidas no visor
-  const activeInstrument = useMemo(
-    () => getInstrumentById(targetInstrumentId),
-    [targetInstrumentId]
-  );
-
-  const selectedStavesList = useMemo(() => {
-    if (!analysis) return [];
-    const effectiveIds =
-      viewMode === 'full-score'
-        ? analysis.staves.map((s) => s.staffId)
-        : selectedStaffIds;
-    return analysis.staves.filter((s) => effectiveIds.includes(s.staffId));
-  }, [analysis, selectedStaffIds, viewMode]);
-
-  const activeStaffSummary = useMemo(() => {
-    if (!analysis) return null;
-    return selectedStavesList[0] || analysis.staves[0] || null;
-  }, [analysis, selectedStavesList]);
-
   const currentConcertTonality = useMemo(() => {
     if (!analysis) return getTonalityByPitchClass(0);
     const concertPc =
@@ -858,11 +1163,58 @@ export default function RubsaxWorkspace() {
 
   const currentWrittenTonality = useMemo(() => {
     if (!analysis) return getTonalityByPitchClass(0);
-    const offset = activeStaffSummary?.writtenSemitoneOffset ?? 0;
+    // Com múltiplos instrumentos na tela, prevalece o Tom Original (Piano / Dó)
+    const offset = multipleInstrumentsActive
+      ? 0
+      : activeStaffSummary?.writtenSemitoneOffset ?? 0;
     const writtenPc =
       ((currentConcertTonality.pitchClass + offset) % 12 + 12) % 12;
     return getTonalityByPitchClass(writtenPc);
-  }, [analysis, currentConcertTonality, activeStaffSummary]);
+  }, [analysis, currentConcertTonality, activeStaffSummary, multipleInstrumentsActive]);
+
+  const allStavesSelectedInUi =
+    Boolean(analysis) &&
+    analysis!.staves.length > 1 &&
+    selectedStavesList.length === analysis!.staves.length;
+
+  const activePartLabelInTopBar =
+    effectiveViewMode === 'full-score' || allStavesSelectedInUi
+      ? 'Grade Completa'
+      : selectedStavesList.length > 1
+      ? selectedStavesList.map((s) => s.displayName).join(' + ')
+      : activeStaffSummary?.displayName ||
+        analysis?.detectedInstrumentName ||
+        activeInstrument.name;
+
+  // Sincronização inteligente dos rascunhos de cabeçalho com os textos renderizados (sem disparar chamadas durante digitação)
+  const renderedHeaderTexts = useMemo(
+    () => ({
+      title: headers.title.text,
+      subtitle: headers.subtitle.text,
+      composer: headers.composer.autoSyncInstrument
+        ? activePartLabelInTopBar
+        : headers.composer.text,
+      lyricist: headers.lyricist.autoSyncPianoKey
+        ? `Tom para Piano: ${currentConcertTonality.majorName}`
+        : headers.lyricist.text,
+    }),
+    [headers, activePartLabelInTopBar, currentConcertTonality.majorName]
+  );
+
+  const prevRenderedHeaderTextsRef = useRef(renderedHeaderTexts);
+  useEffect(() => {
+    const prev = prevRenderedHeaderTextsRef.current;
+    setHeaderDrafts((drafts) => ({
+      title: drafts.title === prev.title ? renderedHeaderTexts.title : drafts.title,
+      subtitle:
+        drafts.subtitle === prev.subtitle ? renderedHeaderTexts.subtitle : drafts.subtitle,
+      composer:
+        drafts.composer === prev.composer ? renderedHeaderTexts.composer : drafts.composer,
+      lyricist:
+        drafts.lyricist === prev.lyricist ? renderedHeaderTexts.lyricist : drafts.lyricist,
+    }));
+    prevRenderedHeaderTextsRef.current = renderedHeaderTexts;
+  }, [renderedHeaderTexts]);
 
   // Executa a transformação XML em segundo plano APÓS o browser pintar a resposta otimista em 0ms
   useEffect(() => {
@@ -937,6 +1289,22 @@ export default function RubsaxWorkspace() {
       }
     }, 16);
   }, [analysis, isSvgLoading, originalMscx, screenTransformOptions, transformResult]);
+
+  const handleShiftActiveOctave = (delta: -1 | 1) => {
+    if (isSvgLoading) return;
+    if (multipleInstrumentsActive) {
+      setOctaveBlockedWarning(true);
+      return;
+    }
+    setOctaveBlockedWarning(false);
+    const nextVal = Math.max(-2, Math.min(2, currentPartOctaveShift + delta));
+    if (nextVal === currentPartOctaveShift) return;
+    scheduleScoreAction(delta < 0 ? 'octave-down' : 'octave-up', 260);
+    setOctaveShiftsByPart((prev) => ({
+      ...prev,
+      [activePartId]: nextVal,
+    }));
+  };
 
   const handleChangeViewMode = (mode: ScoreLayoutViewMode) => {
     if (viewMode === mode || isSvgLoading) return;
@@ -1031,6 +1399,26 @@ export default function RubsaxWorkspace() {
     });
   };
 
+  // Handlers de Quebra de Página
+  const handleClearPageBreaks = () => {
+    if (isSvgLoading) return;
+    if (pageBreakMeasures.length === 0) return;
+    scheduleScoreAction('page-break-clear', 30);
+    setPageBreakMeasures([]);
+  };
+
+  const handleTogglePageBreakMeasure = (measureNumber: number) => {
+    if (isSvgLoading) return;
+    const actionId = `page-break-measure-${measureNumber}`;
+    scheduleScoreAction(actionId, 30);
+    setPageBreakMeasures((prev) => {
+      if (prev.includes(measureNumber)) {
+        return prev.filter((n) => n !== measureNumber);
+      }
+      return [...prev, measureNumber].sort((a, b) => a - b);
+    });
+  };
+
   // Handler de Escala Vetorial (<Spatium>)
   const handleChangeStaffScale = (nextPercent: number, actionId: string, delayMs = 45) => {
     if (isSvgLoading) return;
@@ -1063,31 +1451,68 @@ export default function RubsaxWorkspace() {
     []
   );
 
-  const executeExportPdf = async () => {
-    if (!analysis || !originalMscx || !originalBase64) return;
+  // Handlers explícitos de Aplicar em Textos/Cabeçalho (sem envio enquanto digita)
+  const handleApplyHeaderField = (field: 'title' | 'subtitle' | 'composer' | 'lyricist') => {
+    if (isSvgLoading || areProDrawersLocked) return;
+    const draftVal = headerDrafts[field];
+    if (draftVal === renderedHeaderTexts[field]) return;
+    scheduleScoreAction(`header-apply-${field}`, 30);
+    setHeaders((h) => {
+      if (field === 'title') {
+        return { ...h, title: { ...h.title, text: draftVal } };
+      }
+      if (field === 'subtitle') {
+        return {
+          ...h,
+          subtitle: {
+            ...h.subtitle,
+            text: draftVal,
+            visible: Boolean(draftVal.trim()),
+            removed: false,
+          },
+        };
+      }
+      if (field === 'composer') {
+        return {
+          ...h,
+          composer: { ...h.composer, text: draftVal, autoSyncInstrument: false },
+        };
+      }
+      return {
+        ...h,
+        lyricist: { ...h.lyricist, text: draftVal, autoSyncPianoKey: false },
+      };
+    });
+  };
+
+  const executeExportPdf = async (overrideOptions?: Partial<ScoreTransformOptions>) => {
+    if (!analysis || !originalMscx || !originalBase64 || isExportingLockRef.current) return;
+    isExportingLockRef.current = true;
     setIsExportingPdf(true);
     setUploadError(null);
     try {
+      await yieldToMainThread();
+      const effectivePdfOptions: ScoreTransformOptions = {
+        ...pdfTransformOptions,
+        ...(overrideOptions || {}),
+      };
+
       const pdfTransform = transformScoreXml(
         originalMscx,
         analysis,
-        pdfTransformOptions
+        effectivePdfOptions
       );
 
       const cleanTitle = (
-        headers.title.text ||
+        effectivePdfOptions.headers.title.text ||
         analysis.headers.title.text ||
         'Partitura'
       )
         .replace(/[<>:"/\\|?*]+/g, '')
         .trim();
 
-      const allStavesSelected =
-        analysis.staves.length > 1 &&
-        selectedStavesList.length === analysis.staves.length;
-
       const partLabel =
-        viewMode === 'full-score' || allStavesSelected
+        effectivePdfOptions.viewMode === 'full-score' || allStavesSelectedInUi
           ? 'Grade Completa'
           : selectedStavesList.length > 1
           ? selectedStavesList.map((s) => s.displayName).join(' + ')
@@ -1103,8 +1528,10 @@ export default function RubsaxWorkspace() {
           fileName: analysis.fileName,
           modifiedMscx: pdfTransform.modifiedMscx,
           customPdfName,
-          semitoneShift,
-          octaveShift,
+          semitoneShift: effectivePdfOptions.semitoneShift,
+          octaveShift: effectivePdfOptions.octaveShift,
+          lineBreakMeasures: effectivePdfOptions.lineBreakMeasures,
+          pageBreakMeasures: effectivePdfOptions.pageBreakMeasures,
         }),
       });
 
@@ -1134,6 +1561,7 @@ export default function RubsaxWorkspace() {
         err instanceof Error ? err.message : 'Falha ao exportar o PDF.';
       setUploadError(msg);
     } finally {
+      isExportingLockRef.current = false;
       setIsExportingPdf(false);
     }
   };
@@ -1143,20 +1571,18 @@ export default function RubsaxWorkspace() {
     appSettings.paywall.paywall_enabled !== false &&
     accessLevel === 'preview';
 
-  const areProDrawersLocked =
-    !isDev &&
-    appSettings.paywall.paywall_enabled !== false &&
-    (accessLevel === 'preview' || accessLevel === 'free_pass');
-
   const maintenanceBlocked =
     Boolean(appSettings.operations.maintenance_mode) && !isDev;
 
-  const firstVisibleStaffId = analysis?.staves[0]?.staffId || '1';
-  const isTransposeModified = semitoneShift !== 0 || octaveShift !== 0;
+  const isTransposeModified =
+    semitoneShift !== 0 ||
+    (multipleInstrumentsActive
+      ? Object.values(octaveShiftsByPart).some((v) => v !== 0)
+      : currentPartOctaveShift !== 0);
   const isChordsModified =
     !showChords ||
     !showLyrics ||
-    convertBbEbChordsToWritten ||
+    effectiveConvertChordsToWritten ||
     Object.keys(chordOverrides).length > 0;
   const areXmlHeadersModified = analysis
     ? headers.showAllHeaders !== analysis.headers.showAllHeaders ||
@@ -1177,20 +1603,149 @@ export default function RubsaxWorkspace() {
     : false;
   const isHeadersModified = floatingTexts.length > 0 || areXmlHeadersModified;
   const isScaleModified = staffScalePercent !== 100;
-  const isBreaksModified = analysis
-    ? lineBreakMeasures.length !== analysis.initialLineBreakMeasures.length ||
-      lineBreakMeasures.some((m, i) => m !== analysis.initialLineBreakMeasures[i])
-    : lineBreakMeasures.length > 0;
+
+  const initialLineBreaksForMode = areProDrawersLocked
+    ? []
+    : analysis?.initialLineBreakMeasures || [];
+  const initialPageBreaksForMode = areProDrawersLocked
+    ? []
+    : analysis?.initialPageBreakMeasures || [];
+
+  const isLineBreaksModified =
+    lineBreakMeasures.length !== initialLineBreaksForMode.length ||
+    lineBreakMeasures.some((m, i) => m !== initialLineBreaksForMode[i]);
+  const isPageBreaksModified =
+    pageBreakMeasures.length !== initialPageBreaksForMode.length ||
+    pageBreakMeasures.some((m, i) => m !== initialPageBreaksForMode[i]);
+
   const isStavesModified =
     viewMode !== 'portrait' ||
     selectedStaffIds.length !== 1 ||
     selectedStaffIds[0] !== firstVisibleStaffId;
 
+  // Detecção exata de rascunhos digitados e não aplicados em Textos/Cabeçalho e Cifras
+  const isTitleDraftDirty =
+    !headers.title.removed && headerDrafts.title !== renderedHeaderTexts.title;
+  const isSubtitleDraftDirty =
+    !headers.subtitle.removed && headerDrafts.subtitle !== renderedHeaderTexts.subtitle;
+  const isComposerDraftDirty =
+    !headers.composer.removed && headerDrafts.composer !== renderedHeaderTexts.composer;
+  const isLyricistDraftDirty =
+    !headers.lyricist.removed && headerDrafts.lyricist !== renderedHeaderTexts.lyricist;
+
+  const selectedChordCurrentDisplay = useMemo(() => {
+    if (!selectedChordSymbol || !transformResult) return '';
+    const found = transformResult.chordOccurrences.find(
+      (o) => o.originalSymbol === selectedChordSymbol
+    );
+    return found?.currentSymbol || selectedChordSymbol;
+  }, [selectedChordSymbol, transformResult]);
+
+  const selectedOccurrenceObj = useMemo(() => {
+    if (!selectedOccurrenceKey || !transformResult) return null;
+    return (
+      transformResult.chordOccurrences.find(
+        (o) => o.occurrenceKey === selectedOccurrenceKey
+      ) || null
+    );
+  }, [selectedOccurrenceKey, transformResult]);
+
+  const isGlobalChordDraftDirty = Boolean(
+    selectedChordSymbol &&
+      globalChordInput.trim() &&
+      globalChordInput.trim() !== selectedChordCurrentDisplay
+  );
+  const isMeasureChordDraftDirty = Boolean(
+    selectedChordSymbol &&
+      selectedOccurrenceObj &&
+      measureChordInput.trim() &&
+      measureChordInput.trim() !== selectedOccurrenceObj.currentSymbol
+  );
+
+  const pendingUnappliedItems = useMemo(() => {
+    const items: Array<{ id: string; label: string }> = [];
+    if (!areProDrawersLocked) {
+      if (isTitleDraftDirty) items.push({ id: 'title', label: 'Textos > Título' });
+      if (isSubtitleDraftDirty) items.push({ id: 'subtitle', label: 'Textos > Subtítulo' });
+      if (isComposerDraftDirty) items.push({ id: 'composer', label: 'Textos > Instrumento' });
+      if (isLyricistDraftDirty) items.push({ id: 'lyricist', label: 'Textos > Tom para Piano' });
+      if (isGlobalChordDraftDirty && selectedChordSymbol) {
+        items.push({
+          id: 'chord-global',
+          label: `Cifras > ${selectedChordSymbol} (Editar todas iguais)`,
+        });
+      }
+      if (isMeasureChordDraftDirty && selectedOccurrenceObj) {
+        items.push({
+          id: 'chord-measure',
+          label: `Cifras > Compasso ${selectedOccurrenceObj.measureNumber} (${selectedOccurrenceObj.currentSymbol})`,
+        });
+      }
+    }
+    return items;
+  }, [
+    areProDrawersLocked,
+    isTitleDraftDirty,
+    isSubtitleDraftDirty,
+    isComposerDraftDirty,
+    isLyricistDraftDirty,
+    isGlobalChordDraftDirty,
+    selectedChordSymbol,
+    isMeasureChordDraftDirty,
+    selectedOccurrenceObj,
+  ]);
+
+  const handleApplyAllPendingAndExportPdf = () => {
+    const nextHeaders: ScoreHeadersState = {
+      ...headers,
+      title: isTitleDraftDirty
+        ? { ...headers.title, text: headerDrafts.title }
+        : headers.title,
+      subtitle: isSubtitleDraftDirty
+        ? {
+            ...headers.subtitle,
+            text: headerDrafts.subtitle,
+            visible: Boolean(headerDrafts.subtitle.trim()),
+            removed: false,
+          }
+        : headers.subtitle,
+      composer: isComposerDraftDirty
+        ? { ...headers.composer, text: headerDrafts.composer, autoSyncInstrument: false }
+        : headers.composer,
+      lyricist: isLyricistDraftDirty
+        ? { ...headers.lyricist, text: headerDrafts.lyricist, autoSyncPianoKey: false }
+        : headers.lyricist,
+    };
+
+    const nextChordOverrides: Record<string, string> = { ...chordOverrides };
+    if (isGlobalChordDraftDirty && selectedChordSymbol) {
+      nextChordOverrides[selectedChordSymbol] = globalChordInput.trim();
+    }
+    if (isMeasureChordDraftDirty && selectedOccurrenceObj) {
+      nextChordOverrides[selectedOccurrenceObj.occurrenceKey] = measureChordInput.trim();
+    }
+
+    setHeaders(nextHeaders);
+    setChordOverrides(nextChordOverrides);
+    setSelectedChordSymbol(null);
+    setShowUnappliedChangesModal(false);
+    void executeExportPdf({
+      headers: nextHeaders,
+      chordOverrides: nextChordOverrides,
+    });
+  };
+
   const handleResetTranspose = () => {
     if (isSvgLoading || !isTransposeModified) return;
     scheduleScoreAction('transpose-reset', 45);
     setSemitoneShift(0);
-    setOctaveShift(0);
+    setOctaveBlockedWarning(false);
+    if (!multipleInstrumentsActive) {
+      setOctaveShiftsByPart((prev) => ({
+        ...prev,
+        [activePartId]: 0,
+      }));
+    }
   };
 
   const handleResetChords = () => {
@@ -1200,7 +1755,10 @@ export default function RubsaxWorkspace() {
     setShowLyrics(true);
     setConvertBbEbChordsToWritten(false);
     setChordOverrides({});
-    setEditingChordKey(null);
+    setSelectedChordSymbol(null);
+    setGlobalChordInput('');
+    setSelectedOccurrenceKey('');
+    setMeasureChordInput('');
   };
 
   const handleResetHeaders = () => {
@@ -1209,6 +1767,16 @@ export default function RubsaxWorkspace() {
       scheduleScoreAction('headers-drawer-reset', 45);
     }
     setHeaders(analysis.headers);
+    setHeaderDrafts({
+      title: analysis.headers.title.text,
+      subtitle: analysis.headers.subtitle.text,
+      composer: analysis.headers.composer.autoSyncInstrument
+        ? activePartLabelInTopBar
+        : analysis.headers.composer.text,
+      lyricist: analysis.headers.lyricist.autoSyncPianoKey
+        ? `Tom para Piano: ${currentConcertTonality.majorName}`
+        : analysis.headers.lyricist.text,
+    });
     setFloatingTexts([]);
   };
 
@@ -1217,13 +1785,17 @@ export default function RubsaxWorkspace() {
     handleChangeStaffScale(100, 'scale-drawer-reset', 45);
   };
 
-  const handleResetBreaks = () => {
-    if (!analysis || isSvgLoading || !isBreaksModified || areProDrawersLocked) return;
+  const handleResetLineBreaks = () => {
+    if (!analysis || isSvgLoading || !isLineBreaksModified) return;
     scheduleScoreAction('breaks-drawer-reset', 45);
-    setLineBreakMeasures(analysis.initialLineBreakMeasures);
-    setSystemBreakMode(
-      analysis.initialLineBreakMeasures.length > 0 ? 'initial' : 'auto'
-    );
+    setLineBreakMeasures(initialLineBreaksForMode);
+    setSystemBreakMode(initialLineBreaksForMode.length > 0 ? 'initial' : 'auto');
+  };
+
+  const handleResetPageBreaks = () => {
+    if (!analysis || isSvgLoading || !isPageBreaksModified) return;
+    scheduleScoreAction('page-breaks-drawer-reset', 45);
+    setPageBreakMeasures(initialPageBreaksForMode);
   };
 
   const handleResetStaves = () => {
@@ -1280,39 +1852,100 @@ export default function RubsaxWorkspace() {
   };
 
   const handleRequestExportPdf = () => {
-    if (isExportingPdf) return;
+    if (isExportingPdf || isExportingLockRef.current) return;
     if (isPreviewLocked) {
       openPlansModal('pro');
       return;
     }
-    if (isProcessing || hasUnrenderedChanges) {
+    if (pendingUnappliedItems.length > 0 || isProcessing || hasUnrenderedChanges) {
       setShowUnappliedChangesModal(true);
       return;
     }
     void executeExportPdf();
   };
 
-  const isBbOrEbActive =
-    (activeStaffSummary?.writtenSemitoneOffset ?? 0) !== 0 ||
-    activeInstrument.groupId === 'BB_TREBLE' ||
-    activeInstrument.groupId === 'EB_TREBLE';
+  const formatSavedDateLabel = (ts: number): string => {
+    try {
+      return new Date(ts).toLocaleString('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return '';
+    }
+  };
 
-  const transposingShortLabel =
-    activeStaffSummary?.fifthsOffset === 2 || activeInstrument.groupId === 'BB_TREBLE'
-      ? 'Sib'
-      : 'Mib';
+  const renderRecentProjectsSection = () => {
+    if (recentProjects.length === 0) return null;
+    return (
+      <section className="w-full max-w-2xl rounded-3xl bg-studio-900/85 border border-zinc-800 p-4 sm:p-5 shadow-xl space-y-3 text-left">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-sax-400 shrink-0" />
+            <h3 className="text-xs sm:text-sm font-extrabold text-white">
+              Projetos Recentes (neste dispositivo)
+            </h3>
+          </div>
+          <span className="text-[10px] font-mono text-zinc-400">
+            {recentProjects.length}/5 salvos
+          </span>
+        </div>
 
-  const allStavesSelectedInUi =
-    Boolean(analysis) &&
-    analysis!.staves.length > 1 &&
-    selectedStavesList.length === analysis!.staves.length;
+        <div className="space-y-2">
+          {recentProjects.map((proj) => {
+            const pKey = proj.fileHash || `name:${proj.fileName}`;
+            const isOpeningThis = openingRecentHash === pKey;
+            const displayTitle =
+              proj.headers?.title?.text?.trim() || proj.fileName;
+            return (
+              <div
+                key={pKey}
+                className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 p-3 rounded-2xl bg-studio-950/90 border border-zinc-800 hover:border-zinc-700 transition"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs sm:text-sm font-bold text-zinc-100 truncate">
+                    {displayTitle}
+                  </p>
+                  <p className="text-[11px] text-zinc-400 truncate">
+                    {proj.fileName}
+                    {proj.savedAt ? ` • Salvo em ${formatSavedDateLabel(proj.savedAt)}` : ''}
+                  </p>
+                </div>
 
-  const activePartLabelInTopBar =
-    viewMode === 'full-score' || allStavesSelectedInUi
-      ? 'Grade Completa'
-      : selectedStavesList.length > 1
-      ? selectedStavesList.map((s) => s.displayName).join(' + ')
-      : activeStaffSummary?.displayName || analysis?.detectedInstrumentName || activeInstrument.name;
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    disabled={Boolean(openingRecentHash) || isLoadingFile}
+                    onClick={() => void handleOpenRecentProject(proj)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
+                  >
+                    {isOpeningThis ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <FolderOpen className="w-3.5 h-3.5" />
+                    )}
+                    <span>Abrir</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={Boolean(openingRecentHash) || isLoadingFile}
+                    onClick={() => void handleDeleteRecentProject(proj)}
+                    title="Excluir projeto deste dispositivo"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-red-950/70 hover:text-red-300 border border-zinc-700 hover:border-red-500/40 text-zinc-400 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Excluir</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    );
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-studio-950 text-zinc-100 selection:bg-sax-500 selection:text-studio-950">
@@ -1402,16 +2035,16 @@ export default function RubsaxWorkspace() {
                   RUBSAX <span className="text-sax-400">TRANSPOSER</span>
                 </h1>
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                  v1.3
+                  v1.4
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 hidden sm:block">
-                Transposição precisa com fidelidade original • Formatos aceitos: .mscz, .mscx, .xml
+                Transposição precisa com fidelidade original • Formatos aceitos: .mscz, .mscx, .xml, .mxl
               </p>
             </div>
           </button>
 
-          {/* Botões do Ecossistema Rubsax + Tutorial + Editor + Conta / Modo Dev */}
+          {/* Botões do Ecossistema Rubsax + Tutorial + Planos + Ajuda + Conta / Modo Dev */}
           <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
             {workspaceView === 'welcome' && (
               <button
@@ -1434,6 +2067,14 @@ export default function RubsaxWorkspace() {
                 <span>Tutorial</span>
               </button>
             )}
+
+            <Link
+              href="/planos"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl bg-zinc-800/90 hover:bg-zinc-700 text-zinc-100 text-xs font-bold border border-zinc-700 hover:border-sax-500/50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+            >
+              <CreditCard className="w-3.5 h-3.5 text-sax-400" />
+              <span>Planos</span>
+            </Link>
 
             <Link
               href="/ajuda"
@@ -1599,10 +2240,18 @@ export default function RubsaxWorkspace() {
 
               <div className="flex items-center gap-1.5">
                 <span className="text-zinc-400 font-medium">
-                  Na pauta ({activePartLabelInTopBar}):
+                  {multipleInstrumentsActive
+                    ? `Referência (${activePartLabelInTopBar}):`
+                    : `Na pauta (${activePartLabelInTopBar}):`}
                 </span>
-                <span className="font-extrabold text-sax-400">
-                  {currentWrittenTonality.majorName}
+                <span
+                  className={`font-extrabold ${
+                    multipleInstrumentsActive ? 'text-sky-300' : 'text-sax-400'
+                  }`}
+                >
+                  {multipleInstrumentsActive
+                    ? `Tom Original (${currentConcertTonality.majorName})`
+                    : currentWrittenTonality.majorName}
                 </span>
               </div>
             </div>
@@ -1657,6 +2306,27 @@ export default function RubsaxWorkspace() {
         </div>
       </header>
 
+      {/* FAIXA DE CONTAGEM REGRESSIVA DO MODO GRATUITO (quando em cooldown e sem plano mensal) */}
+      {authUser &&
+        !isDev &&
+        !activeSubscription &&
+        freePassStatus?.state === 'cooldown' &&
+        freePassStatus.cooldownUntil && (
+          <div className="bg-amber-950/35 border-b border-amber-500/30 px-4 py-2 text-xs flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5">
+            <FreePassCountdown
+              mode="cooldown"
+              targetIso={freePassStatus.cooldownUntil}
+              onExpire={() => void refreshAuthAndSettings(fileHash, 'if-access-changed')}
+            />
+            <Link
+              href="/planos"
+              className="text-[11px] font-extrabold text-sax-300 hover:text-sax-200 underline underline-offset-2"
+            >
+              Liberar agora com Avulso ou Mensal PRO
+            </Link>
+          </div>
+        )}
+
       {/* ALERTA DE ERRO OU FORMATO NÃO SUPORTADO */}
       {uploadError && (
         <div className="bg-red-950/90 border-b border-red-500/50 px-4 py-3 text-red-100 text-xs sm:text-sm flex items-center justify-between gap-3 animate-fadeIn">
@@ -1691,35 +2361,36 @@ export default function RubsaxWorkspace() {
               </p>
             </div>
           ) : (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDragging(false);
-              if (!ensureCopyrightAccepted()) return;
-              const f = e.dataTransfer.files?.[0];
-              if (f) void handleFileUpload(f);
-            }}
-            onClick={() => {
-              if (isLoadingFile) return;
-              if (!ensureCopyrightAccepted()) return;
-              fileInputRef.current?.click();
-            }}
-            className={`w-full max-w-2xl rounded-3xl border-2 border-dashed p-6 sm:p-12 text-center cursor-pointer transition-all shadow-2xl ${
-              isDragging
-                ? 'border-sax-400 bg-sax-500/10 scale-[1.01]'
-                : 'border-zinc-700/80 bg-studio-900/80 hover:border-sax-500/60 hover:bg-studio-900'
-            }`}
-          >
-            {isLoadingFile ? (
-              <div className="flex flex-col items-center justify-center py-8 gap-4">
-                <Loader2 className="w-12 h-12 text-sax-400 animate-spin" />
-                <div className="space-y-1">
-                  <p className="text-lg sm:text-xl font-extrabold text-white">
+            <>
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  if (!ensureCopyrightAccepted()) return;
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) void handleFileUpload(f);
+                }}
+                onClick={() => {
+                  if (isLoadingFile) return;
+                  if (!ensureCopyrightAccepted()) return;
+                  fileInputRef.current?.click();
+                }}
+                className={`w-full max-w-2xl rounded-3xl border-2 border-dashed p-6 sm:p-12 text-center cursor-pointer transition-all shadow-2xl ${
+                  isDragging
+                    ? 'border-sax-400 bg-sax-500/10 scale-[1.01]'
+                    : 'border-zinc-700/80 bg-studio-900/80 hover:border-sax-500/60 hover:bg-studio-900'
+                }`}
+              >
+                {isLoadingFile ? (
+                  <div className="flex flex-col items-center justify-center py-8 gap-4">
+                    <Loader2 className="w-12 h-12 text-sax-400 animate-spin" />
+                    <div className="space-y-1">
+                      <p className="text-lg sm:text-xl font-extrabold text-white">
                     Processando sua partitura...
                   </p>
                   <p className="text-xs sm:text-sm text-zinc-400">
@@ -1753,7 +2424,7 @@ export default function RubsaxWorkspace() {
 
                 <div className="space-y-2 max-w-lg">
                   <span className="inline-block text-[11px] font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-sax-500/15 text-sax-300 border border-sax-500/30">
-                    RUBSAX TRANSPOSER v1.3
+                    RUBSAX TRANSPOSER v1.4
                   </span>
                   <h2 className="text-sm sm:text-base font-bold text-sax-300 tracking-wide">
                     Transpositor de Partituras e Extrator de Partes Online
@@ -1816,7 +2487,7 @@ export default function RubsaxWorkspace() {
                   }`}
                 >
                   <Upload className="w-4 h-4" />
-                  <span>Selecionar Arquivo (.mscz, .mscx, .xml)</span>
+                  <span>Selecionar Arquivo (.mscz, .mscx, .xml, .mxl)</span>
                 </button>
 
                 <div className="pt-1 flex flex-wrap items-center justify-center gap-2 text-[11px] text-zinc-400">
@@ -1833,6 +2504,8 @@ export default function RubsaxWorkspace() {
               </div>
             )}
           </div>
+          {renderRecentProjectsSection()}
+            </>
           )}
 
           {/* VÍDEO TUTORIAL INCORPORADO NA TELA INICIAL (configurado via /admin) */}
@@ -1927,7 +2600,6 @@ export default function RubsaxWorkspace() {
               >
                 <span className="inline-flex items-center gap-0.5">
                   <SplitSquareVertical className="w-3.5 h-3.5" />
-                  {areProDrawersLocked && <Lock className="w-2.5 h-2.5 text-sax-400" />}
                 </span>
                 <span>Sistema</span>
               </button>
@@ -1974,22 +2646,34 @@ export default function RubsaxWorkspace() {
                   </span>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={isSvgLoading}
-                  onClick={() => {
-                    if (!ensureCopyrightAccepted()) return;
-                    fileInputRef.current?.click();
-                  }}
-                  className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-                >
-                  <Upload className="w-4 h-4 text-sax-400" />
-                  <span>
-                    {analysis
-                      ? 'Enviar outro arquivo (.mscz, .mscx, .xml)'
-                      : 'Enviar partitura (.mscz, .mscx, .xml)'}
-                  </span>
-                </button>
+                <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    disabled={isSvgLoading}
+                    onClick={() => {
+                      if (!ensureCopyrightAccepted()) return;
+                      fileInputRef.current?.click();
+                    }}
+                    className="w-full py-2 px-3 rounded-xl bg-zinc-800/90 hover:bg-zinc-800 disabled:opacity-50 disabled:cursor-not-allowed border border-zinc-700 text-xs text-zinc-200 flex items-center justify-center gap-2 font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <Upload className="w-4 h-4 text-sax-400" />
+                    <span>
+                      {analysis
+                        ? 'Enviar outro arquivo (.mscz, .mscx, .xml, .mxl)'
+                        : 'Enviar partitura (.mscz, .mscx, .xml, .mxl)'}
+                    </span>
+                  </button>
+                  {analysis && (
+                    <button
+                      type="button"
+                      onClick={handleCloseCurrentScore}
+                      className="w-full py-1.5 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      <span>Fechar partitura atual</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               {!analysis && (
@@ -2020,33 +2704,14 @@ export default function RubsaxWorkspace() {
 
                 {/* Seletor Direto de Tonalidade */}
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs gap-1">
-                    <label className="text-zinc-300 font-semibold">
-                      Ir para Tonalidade (Piano Dó):
-                    </label>
-                    <div className="flex items-center gap-1 text-[10px]">
-                      {(
-                        [
-                          { id: 'closest', label: 'Mais Próximo' },
-                          { id: 'up', label: 'Acima' },
-                          { id: 'down', label: 'Abaixo' },
-                        ] as const
-                      ).map((dir) => (
-                        <button
-                          key={dir.id}
-                          type="button"
-                          onClick={() => setTransposeDirection(dir.id)}
-                          className={`px-1.5 py-0.5 rounded active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
-                            transposeDirection === dir.id
-                              ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
-                              : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
-                          }`}
-                        >
-                          {dir.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                  <label className="block text-xs text-zinc-300 font-semibold">
+                    Mudar tonalidade
+                  </label>
+                  {multipleInstrumentsActive && (
+                    <p className="text-[11px] text-sky-300/90 leading-snug">
+                      Grade / Múltiplos instrumentos: referência fixa no Tom Original (Piano / Dó).
+                    </p>
+                  )}
 
                   <div className="relative">
                     <select
@@ -2130,31 +2795,35 @@ export default function RubsaxWorkspace() {
                   </div>
                 </div>
 
-                {/* Botões de Oitava (estritamente limitados entre -2 e +2 oitavas) */}
+                {/* Botões de Oitava (estritamente limitados entre -2 e +2 oitavas; apenas 1 instrumento por vez) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs gap-1">
                     <span className="text-zinc-300 font-semibold">
                       Oitava (±12 st • máx. ±2):
                     </span>
                     <span className="font-mono text-xs px-2 py-0.5 rounded bg-zinc-800 text-sky-300">
-                      {octaveShift > 0 ? `+${octaveShift}` : octaveShift} 8va (
-                      {octaveShift * 12 > 0 ? `+${octaveShift * 12}` : octaveShift * 12} st)
+                      {currentPartOctaveShift > 0
+                        ? `+${currentPartOctaveShift}`
+                        : currentPartOctaveShift}{' '}
+                      8va (
+                      {currentPartOctaveShift * 12 > 0
+                        ? `+${currentPartOctaveShift * 12}`
+                        : currentPartOctaveShift * 12}{' '}
+                      st)
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      disabled={octaveShift <= -2 || isSvgLoading}
-                      onClick={() => {
-                        if (octaveShift <= -2 || isSvgLoading) return;
-                        scheduleScoreAction('octave-down', 320);
-                        setOctaveShift((o) => Math.max(-2, o - 1));
-                      }}
+                      disabled={(!multipleInstrumentsActive && currentPartOctaveShift <= -2) || isSvgLoading}
+                      onClick={() => handleShiftActiveOctave(-1)}
                       className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-40 disabled:cursor-not-allowed ${
-                        (isProcessing && activeActionId === 'octave-down') ||
-                        octaveShift < 0
-                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
-                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                        multipleInstrumentsActive
+                          ? 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:border-amber-500/40'
+                          : (isProcessing && activeActionId === 'octave-down') ||
+                              currentPartOctaveShift < 0
+                            ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
                       }`}
                     >
                       {isProcessing && activeActionId === 'octave-down' ? (
@@ -2167,17 +2836,15 @@ export default function RubsaxWorkspace() {
 
                     <button
                       type="button"
-                      disabled={octaveShift >= 2 || isSvgLoading}
-                      onClick={() => {
-                        if (octaveShift >= 2 || isSvgLoading) return;
-                        scheduleScoreAction('octave-up', 320);
-                        setOctaveShift((o) => Math.min(2, o + 1));
-                      }}
+                      disabled={(!multipleInstrumentsActive && currentPartOctaveShift >= 2) || isSvgLoading}
+                      onClick={() => handleShiftActiveOctave(1)}
                       className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-40 disabled:cursor-not-allowed ${
-                        (isProcessing && activeActionId === 'octave-up') ||
-                        octaveShift > 0
-                          ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
-                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                        multipleInstrumentsActive
+                          ? 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:border-amber-500/40'
+                          : (isProcessing && activeActionId === 'octave-up') ||
+                              currentPartOctaveShift > 0
+                            ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
                       }`}
                     >
                       {isProcessing && activeActionId === 'octave-up' ? (
@@ -2188,6 +2855,12 @@ export default function RubsaxWorkspace() {
                       <span>+1 Oitava</span>
                     </button>
                   </div>
+                  {octaveBlockedWarning && multipleInstrumentsActive && (
+                    <div className="p-2.5 rounded-xl bg-amber-950/60 border border-amber-500/45 text-[11px] font-semibold text-amber-200 flex items-start gap-2 animate-fadeIn">
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <span>Só é possível alterar a oitava com um instrumento por vez.</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Ação Direta: Baixar PDF */}
@@ -2347,8 +3020,8 @@ export default function RubsaxWorkspace() {
                 {/* Afinação das Cifras Visíveis e Edição de Cifras Existentes */}
                 {analysis?.hasChords && (
                   <div className="p-3 rounded-xl bg-zinc-900/90 border border-sax-500/30 space-y-2.5">
-                    {isBbOrEbActive && (
-                      <>
+                    {hasAnyTransposingActive && (
+                      <div className="space-y-2">
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-bold text-sax-300">
                             Afinação das Cifras Visíveis ({activePartLabelInTopBar}):
@@ -2359,12 +3032,12 @@ export default function RubsaxWorkspace() {
                             type="button"
                             disabled={isSvgLoading}
                             onClick={() => {
-                              if (!convertBbEbChordsToWritten || isSvgLoading) return;
+                              if (!effectiveConvertChordsToWritten || isSvgLoading) return;
                               scheduleScoreAction('chords-concert', 40);
                               setConvertBbEbChordsToWritten(false);
                             }}
                             className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                              !convertBbEbChordsToWritten
+                              !effectiveConvertChordsToWritten
                                 ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                             }`}
@@ -2372,18 +3045,24 @@ export default function RubsaxWorkspace() {
                             {isProcessing && activeActionId === 'chords-concert' && (
                               <Loader2 className="w-3 h-3 animate-spin" />
                             )}
-                            <span>Tom do Piano (Dó)</span>
+                            <span>Tom Original (Piano)</span>
                           </button>
                           <button
                             type="button"
-                            disabled={isSvgLoading}
+                            disabled={isSvgLoading || isMixedTransposition}
                             onClick={() => {
-                              if (convertBbEbChordsToWritten || isSvgLoading) return;
+                              if (
+                                isMixedTransposition ||
+                                effectiveConvertChordsToWritten ||
+                                isSvgLoading
+                              ) {
+                                return;
+                              }
                               scheduleScoreAction('chords-written', 40);
                               setConvertBbEbChordsToWritten(true);
                             }}
-                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                              convertBbEbChordsToWritten
+                            className={`py-1.5 px-2 rounded-lg font-semibold border flex items-center justify-center gap-1 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                              effectiveConvertChordsToWritten
                                 ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
                                 : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                             }`}
@@ -2391,10 +3070,23 @@ export default function RubsaxWorkspace() {
                             {isProcessing && activeActionId === 'chords-written' && (
                               <Loader2 className="w-3 h-3 animate-spin" />
                             )}
-                            <span>Converter p/ {transposingShortLabel}</span>
+                            <span>
+                              {detectedTuningLabel
+                                ? `Tom Escrito (${detectedTuningLabel})`
+                                : 'Tom Escrito (Transpositor)'}
+                            </span>
                           </button>
                         </div>
-                      </>
+                        {isMixedTransposition && (
+                          <div className="p-2 rounded-lg bg-amber-950/50 border border-amber-500/40 text-[11px] font-semibold text-amber-200 flex items-start gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                            <span>
+                              Isole um único instrumento transpositor para converter as cifras para o
+                              tom escrito
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {/* Cifras na tela (Clicáveis para Editar escrita de cifras existentes) */}
@@ -2413,7 +3105,10 @@ export default function RubsaxWorkspace() {
                                 if (isSvgLoading) return;
                                 scheduleScoreAction('chords-reset', 40);
                                 setChordOverrides({});
-                                setEditingChordKey(null);
+                                setSelectedChordSymbol(null);
+                                setGlobalChordInput('');
+                                setSelectedOccurrenceKey('');
+                                setMeasureChordInput('');
                               }}
                               className="text-[10px] text-sax-400 hover:underline disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                             >
@@ -2438,17 +3133,26 @@ export default function RubsaxWorkspace() {
                               []
                             )
                             .map((item) => {
-                              const isSelected =
-                                chordEditMode === 'symbol' && editingChordKey === item.original;
+                              const isSelected = selectedChordSymbol === item.original;
                               const isModified = item.current !== item.original;
                               return (
                                 <button
                                   key={item.original}
                                   type="button"
                                   onClick={() => {
-                                    setChordEditMode('symbol');
-                                    setEditingChordKey(item.original);
-                                    setEditingChordValue(item.current);
+                                    setSelectedChordSymbol(item.original);
+                                    setGlobalChordInput(item.current);
+                                    const matchingOcc =
+                                      transformResult.chordOccurrences.find(
+                                        (o) => o.originalSymbol === item.original
+                                      ) || transformResult.chordOccurrences[0];
+                                    if (matchingOcc) {
+                                      setSelectedOccurrenceKey(matchingOcc.occurrenceKey);
+                                      setMeasureChordInput(matchingOcc.currentSymbol);
+                                    } else {
+                                      setSelectedOccurrenceKey('');
+                                      setMeasureChordInput('');
+                                    }
                                   }}
                                   className={`px-2 py-1 rounded-lg font-mono text-xs font-bold border active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                                     isSelected
@@ -2465,91 +3169,153 @@ export default function RubsaxWorkspace() {
                             })}
                         </div>
 
-                        {/* Caixa de edição da cifra selecionada */}
-                        {editingChordKey !== null && (
-                          <div className="p-2.5 rounded-xl bg-studio-950 border border-sax-500/40 space-y-2 animate-fadeIn">
-                            <div className="flex items-center justify-between text-[11px]">
-                              <span className="text-zinc-300 font-semibold">
-                                Editar cifra{' '}
-                                <strong className="text-sax-400 font-mono">
-                                  {editingChordKey}
-                                </strong>
-                                :
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setChordEditMode((m) =>
-                                    m === 'symbol' ? 'occurrence' : 'symbol'
-                                  )
-                                }
-                                className="text-[10px] text-sky-400 hover:underline active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-                              >
-                                {chordEditMode === 'symbol'
-                                  ? 'Editar por compasso'
-                                  : 'Editar todas iguais'}
-                              </button>
-                            </div>
+                        {/* Duas caixas simultâneas de edição da cifra selecionada */}
+                        {selectedChordSymbol !== null && (() => {
+                          const matchingOccurrences = transformResult.chordOccurrences.filter(
+                            (o) => o.originalSymbol === selectedChordSymbol
+                          );
+                          const occurrencesForDropdown =
+                            matchingOccurrences.length > 0
+                              ? matchingOccurrences
+                              : transformResult.chordOccurrences;
 
-                            {chordEditMode === 'occurrence' && (
-                              <select
-                                value={editingChordKey}
-                                onChange={(e) => {
-                                  const k = e.target.value;
-                                  setEditingChordKey(k);
-                                  const found = transformResult.chordOccurrences.find(
-                                    (o) => `#${o.occurrenceIndex}` === k
-                                  );
-                                  if (found) setEditingChordValue(found.currentSymbol);
-                                }}
-                                className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-[11px] text-zinc-200"
-                              >
-                                {transformResult.chordOccurrences.map((occ) => (
-                                  <option
-                                    key={occ.occurrenceIndex}
-                                    value={`#${occ.occurrenceIndex}`}
+                          return (
+                            <div className="p-2.5 rounded-xl bg-studio-950 border border-sax-500/40 space-y-3 animate-fadeIn">
+                              <div className="flex items-center justify-between text-[11px] border-b border-zinc-800 pb-1.5">
+                                <span className="text-zinc-300 font-semibold">
+                                  Editando cifra:{' '}
+                                  <strong className="text-sax-400 font-mono">
+                                    {selectedChordSymbol}
+                                  </strong>
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedChordSymbol(null);
+                                    setGlobalChordInput('');
+                                    setSelectedOccurrenceKey('');
+                                    setMeasureChordInput('');
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 text-xs active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                                  title="Fechar edição de cifra"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+
+                              {/* Caixa Superior: Editar todas iguais */}
+                              <div className="space-y-1.5 p-2 rounded-lg bg-zinc-900/80 border border-zinc-800">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-bold text-zinc-100">
+                                    Editar todas iguais
+                                  </span>
+                                  {isGlobalChordDraftDirty && (
+                                    <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                      Não aplicado
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[10px] text-zinc-400 leading-snug">
+                                  Altera todas as ocorrências desta cifra na partitura ao clicar em
+                                  Aplicar.
+                                </p>
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={globalChordInput}
+                                    onChange={(e) => setGlobalChordInput(e.target.value)}
+                                    placeholder="Ex: Dm7(9), A7/C#, Bb9"
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-xs font-mono text-white focus:outline-none focus:border-sax-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={isSvgLoading || !globalChordInput.trim()}
+                                    onClick={() => {
+                                      if (!globalChordInput.trim() || isSvgLoading) return;
+                                      const nextSym = globalChordInput.trim();
+                                      scheduleScoreAction('chord-edit-apply', 40);
+                                      setChordOverrides((prev) => ({
+                                        ...prev,
+                                        [selectedChordSymbol]: nextSym,
+                                      }));
+                                      setMeasureChordInput(nextSym);
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                                   >
-                                    Compasso {occ.measureNumber}: {occ.currentSymbol} (orig:{' '}
-                                    {occ.originalSymbol})
-                                  </option>
-                                ))}
-                              </select>
-                            )}
+                                    Aplicar
+                                  </button>
+                                </div>
+                              </div>
 
-                            <div className="flex items-center gap-1.5">
-                              <input
-                                type="text"
-                                value={editingChordValue}
-                                onChange={(e) => setEditingChordValue(e.target.value)}
-                                placeholder="Ex: Dm7(9), A7/C#, Bb9"
-                                className="flex-1 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-xs font-mono text-white focus:outline-none focus:border-sax-500"
-                              />
-                              <button
-                                type="button"
-                                disabled={isSvgLoading}
-                                onClick={() => {
-                                  if (!editingChordValue.trim() || isSvgLoading) return;
-                                  scheduleScoreAction('chord-edit-apply', 40);
-                                  setChordOverrides((prev) => ({
-                                    ...prev,
-                                    [editingChordKey]: editingChordValue.trim(),
-                                  }));
-                                  setEditingChordKey(null);
-                                }}
-                                className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-                              >
-                                Aplicar
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setEditingChordKey(null)}
-                                className="px-2 py-1.5 rounded-lg bg-zinc-800 text-zinc-400 text-xs active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-                              >
-                                ✕
-                              </button>
+                              {/* Caixa Inferior: Editar por compasso */}
+                              <div className="space-y-1.5 p-2 rounded-lg bg-zinc-900/80 border border-zinc-800">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-[11px] font-bold text-zinc-100">
+                                    Editar por compasso
+                                  </span>
+                                  {isMeasureChordDraftDirty && (
+                                    <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                      Não aplicado
+                                    </span>
+                                  )}
+                                </div>
+                                <select
+                                  value={selectedOccurrenceKey}
+                                  onChange={(e) => {
+                                    const k = e.target.value;
+                                    setSelectedOccurrenceKey(k);
+                                    const found = occurrencesForDropdown.find(
+                                      (o) => o.occurrenceKey === k
+                                    );
+                                    if (found) setMeasureChordInput(found.currentSymbol);
+                                  }}
+                                  className="w-full px-2 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-[11px] text-zinc-200 focus:outline-none focus:border-sax-500"
+                                >
+                                  {occurrencesForDropdown.map((occ) => (
+                                    <option key={occ.occurrenceKey} value={occ.occurrenceKey}>
+                                      Compasso {occ.measureNumber}: {occ.currentSymbol} (orig:{' '}
+                                      {occ.originalSymbol})
+                                    </option>
+                                  ))}
+                                </select>
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={measureChordInput}
+                                    onChange={(e) => setMeasureChordInput(e.target.value)}
+                                    placeholder="Nova cifra neste compasso"
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-xs font-mono text-white focus:outline-none focus:border-sax-500"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      isSvgLoading ||
+                                      !selectedOccurrenceKey ||
+                                      !measureChordInput.trim()
+                                    }
+                                    onClick={() => {
+                                      if (
+                                        !selectedOccurrenceKey ||
+                                        !measureChordInput.trim() ||
+                                        isSvgLoading
+                                      ) {
+                                        return;
+                                      }
+                                      scheduleScoreAction('chord-occurrence-apply', 40);
+                                      setChordOverrides((prev) => ({
+                                        ...prev,
+                                        [selectedOccurrenceKey]: measureChordInput.trim(),
+                                      }));
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg bg-sax-500 hover:bg-sax-400 disabled:opacity-50 text-studio-950 text-xs font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                                  >
+                                    Aplicar
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -2626,8 +3392,8 @@ export default function RubsaxWorkspace() {
                       </span>
                     </button>
 
-                    <span className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-semibold text-emerald-300">
-                      Atualização instantânea
+                    <span className="inline-flex items-center px-2 py-0.5 rounded bg-zinc-800/90 border border-zinc-700 text-[10px] font-semibold text-zinc-300">
+                      Confirmação manual
                     </span>
                   </div>
 
@@ -2751,14 +3517,20 @@ export default function RubsaxWorkspace() {
                   {/* Editor de Cabeçalho — Sempre aberto no Desktop e no Mobile */}
                   <div className="p-3 rounded-xl bg-zinc-900/95 border border-zinc-700 space-y-2.5 text-xs">
                     <p className="text-[11px] text-zinc-400">
-                      Edite, oculte ou remova os textos de cabeçalho (atualiza instantaneamente no
-                      visor; fonte e tamanho originais travados):
+                      Edite os textos de cabeçalho e clique em <strong className="text-zinc-200">Aplicar</strong> ao lado do campo para atualizar a partitura (fonte e tamanho originais travados):
                     </p>
 
                     {/* Título */}
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="font-semibold text-zinc-300">Título:</label>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <label className="font-semibold text-zinc-300">Título:</label>
+                          {isTitleDraftDirty && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              Não aplicado
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
@@ -2799,26 +3571,54 @@ export default function RubsaxWorkspace() {
                           </button>
                         </div>
                       </div>
-                      <input
-                        type="text"
-                        readOnly={isSvgLoading}
-                        disabled={headers.title.removed}
-                        value={headers.title.text}
-                        onChange={(e) => {
-                          scheduleScoreAction('header-title-text', 350);
-                          setHeaders((h) => ({
-                            ...h,
-                            title: { ...h.title, text: e.target.value },
-                          }));
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          readOnly={isSvgLoading}
+                          disabled={headers.title.removed}
+                          value={headerDrafts.title}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setHeaderDrafts((prev) => ({ ...prev, title: val }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleApplyHeaderField('title');
+                            }
+                          }}
+                          className={`flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border text-zinc-100 disabled:opacity-40 focus:outline-none ${
+                            isTitleDraftDirty
+                              ? 'border-amber-500/70 ring-1 ring-amber-500/30'
+                              : 'border-zinc-700 focus:border-sax-500'
+                          }`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isSvgLoading || headers.title.removed || !isTitleDraftDirty}
+                          onClick={() => handleApplyHeaderField('title')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                            isTitleDraftDirty
+                              ? 'bg-sax-500 hover:bg-sax-400 text-studio-950 shadow-sm'
+                              : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}
+                        >
+                          Aplicar
+                        </button>
+                      </div>
                     </div>
 
                     {/* Subtítulo */}
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="font-semibold text-zinc-300">Subtítulo:</label>
+                      <div className="flex items-center justify-between gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <label className="font-semibold text-zinc-300">Subtítulo:</label>
+                          {isSubtitleDraftDirty && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              Não aplicado
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
@@ -2859,48 +3659,83 @@ export default function RubsaxWorkspace() {
                           </button>
                         </div>
                       </div>
-                      <input
-                        type="text"
-                        readOnly={isSvgLoading}
-                        disabled={headers.subtitle.removed}
-                        placeholder="Ex: Artista / Cantor"
-                        value={headers.subtitle.text}
-                        onChange={(e) => {
-                          scheduleScoreAction('header-sub-text', 350);
-                          setHeaders((h) => ({
-                            ...h,
-                            subtitle: {
-                              ...h.subtitle,
-                              text: e.target.value,
-                              visible: true,
-                              removed: false,
-                            },
-                          }));
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          readOnly={isSvgLoading}
+                          disabled={headers.subtitle.removed}
+                          placeholder="Ex: Artista / Cantor"
+                          value={headerDrafts.subtitle}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setHeaderDrafts((prev) => ({ ...prev, subtitle: val }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleApplyHeaderField('subtitle');
+                            }
+                          }}
+                          className={`flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border text-zinc-100 disabled:opacity-40 focus:outline-none ${
+                            isSubtitleDraftDirty
+                              ? 'border-amber-500/70 ring-1 ring-amber-500/30'
+                              : 'border-zinc-700 focus:border-sax-500'
+                          }`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isSvgLoading || headers.subtitle.removed || !isSubtitleDraftDirty}
+                          onClick={() => handleApplyHeaderField('subtitle')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                            isSubtitleDraftDirty
+                              ? 'bg-sax-500 hover:bg-sax-400 text-studio-950 shadow-sm'
+                              : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}
+                        >
+                          Aplicar
+                        </button>
+                      </div>
                     </div>
 
                     {/* Compositor / Instrumento (Canto Superior Direito) */}
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="font-semibold text-zinc-300">
-                          Instrumento (Canto Sup. Direito):
-                        </label>
+                      <div className="flex items-center justify-between gap-1 flex-wrap">
+                        <div className="flex items-center gap-1.5">
+                          <label className="font-semibold text-zinc-300">
+                            Instrumento (Canto Sup. Direito):
+                          </label>
+                          {isComposerDraftDirty && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              Não aplicado
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
                             disabled={isSvgLoading}
                             onClick={() => {
                               if (isSvgLoading) return;
+                              const nextAuto = !headers.composer.autoSyncInstrument;
                               scheduleScoreAction('header-comp-auto', 120);
                               setHeaders((h) => ({
                                 ...h,
                                 composer: {
                                   ...h.composer,
-                                  autoSyncInstrument: !h.composer.autoSyncInstrument,
+                                  autoSyncInstrument: nextAuto,
                                 },
                               }));
+                              if (nextAuto) {
+                                setHeaderDrafts((prev) => ({
+                                  ...prev,
+                                  composer: activePartLabelInTopBar,
+                                }));
+                              } else {
+                                setHeaderDrafts((prev) => ({
+                                  ...prev,
+                                  composer: headers.composer.text,
+                                }));
+                              }
                             }}
                             className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                               headers.composer.autoSyncInstrument
@@ -2949,50 +3784,82 @@ export default function RubsaxWorkspace() {
                           </button>
                         </div>
                       </div>
-                      <input
-                        type="text"
-                        readOnly={isSvgLoading}
-                        disabled={headers.composer.removed}
-                        value={
-                          headers.composer.autoSyncInstrument
-                            ? activePartLabelInTopBar
-                            : headers.composer.text
-                        }
-                        onChange={(e) => {
-                          scheduleScoreAction('header-comp-text', 350);
-                          setHeaders((h) => ({
-                            ...h,
-                            composer: {
-                              ...h.composer,
-                              text: e.target.value,
-                              autoSyncInstrument: false,
-                            },
-                          }));
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          readOnly={isSvgLoading}
+                          disabled={headers.composer.removed}
+                          value={headerDrafts.composer}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setHeaderDrafts((prev) => ({ ...prev, composer: val }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleApplyHeaderField('composer');
+                            }
+                          }}
+                          className={`flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border text-zinc-100 disabled:opacity-40 focus:outline-none ${
+                            isComposerDraftDirty
+                              ? 'border-amber-500/70 ring-1 ring-amber-500/30'
+                              : 'border-zinc-700 focus:border-sax-500'
+                          }`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isSvgLoading || headers.composer.removed || !isComposerDraftDirty}
+                          onClick={() => handleApplyHeaderField('composer')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                            isComposerDraftDirty
+                              ? 'bg-sax-500 hover:bg-sax-400 text-studio-950 shadow-sm'
+                              : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}
+                        >
+                          Aplicar
+                        </button>
+                      </div>
                     </div>
 
                     {/* Letrista / Indicador Tom para Piano */}
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between">
-                        <label className="font-semibold text-zinc-300">
-                          Tom para Piano (Canto Sup. Esquerdo):
-                        </label>
+                      <div className="flex items-center justify-between gap-1 flex-wrap">
+                        <div className="flex items-center gap-1.5">
+                          <label className="font-semibold text-zinc-300">
+                            Tom para Piano (Canto Sup. Esquerdo):
+                          </label>
+                          {isLyricistDraftDirty && (
+                            <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              Não aplicado
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
                             disabled={isSvgLoading}
                             onClick={() => {
                               if (isSvgLoading) return;
+                              const nextAuto = !headers.lyricist.autoSyncPianoKey;
                               scheduleScoreAction('header-lyr-auto', 120);
                               setHeaders((h) => ({
                                 ...h,
                                 lyricist: {
                                   ...h.lyricist,
-                                  autoSyncPianoKey: !h.lyricist.autoSyncPianoKey,
+                                  autoSyncPianoKey: nextAuto,
                                 },
                               }));
+                              if (nextAuto) {
+                                setHeaderDrafts((prev) => ({
+                                  ...prev,
+                                  lyricist: `Tom para Piano: ${currentConcertTonality.majorName}`,
+                                }));
+                              } else {
+                                setHeaderDrafts((prev) => ({
+                                  ...prev,
+                                  lyricist: headers.lyricist.text,
+                                }));
+                              }
                             }}
                             className={`px-1.5 py-0.5 rounded text-[10px] flex items-center gap-1 disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
                               headers.lyricist.autoSyncPianoKey
@@ -3041,28 +3908,41 @@ export default function RubsaxWorkspace() {
                           </button>
                         </div>
                       </div>
-                      <input
-                        type="text"
-                        readOnly={isSvgLoading}
-                        disabled={headers.lyricist.removed}
-                        value={
-                          headers.lyricist.autoSyncPianoKey
-                            ? `Tom para Piano: ${currentConcertTonality.majorName}`
-                            : headers.lyricist.text
-                        }
-                        onChange={(e) => {
-                          scheduleScoreAction('header-lyr-text', 350);
-                          setHeaders((h) => ({
-                            ...h,
-                            lyricist: {
-                              ...h.lyricist,
-                              text: e.target.value,
-                              autoSyncPianoKey: false,
-                            },
-                          }));
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-studio-950 border border-zinc-700 text-zinc-100 disabled:opacity-40"
-                      />
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          readOnly={isSvgLoading}
+                          disabled={headers.lyricist.removed}
+                          value={headerDrafts.lyricist}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setHeaderDrafts((prev) => ({ ...prev, lyricist: val }));
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleApplyHeaderField('lyricist');
+                            }
+                          }}
+                          className={`flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-studio-950 border text-zinc-100 disabled:opacity-40 focus:outline-none ${
+                            isLyricistDraftDirty
+                              ? 'border-amber-500/70 ring-1 ring-amber-500/30'
+                              : 'border-zinc-700 focus:border-sax-500'
+                          }`}
+                        />
+                        <button
+                          type="button"
+                          disabled={isSvgLoading || headers.lyricist.removed || !isLyricistDraftDirty}
+                          onClick={() => handleApplyHeaderField('lyricist')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-45 disabled:cursor-not-allowed ${
+                            isLyricistDraftDirty
+                              ? 'bg-sax-500 hover:bg-sax-400 text-studio-950 shadow-sm'
+                              : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}
+                        >
+                          Aplicar
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -3208,161 +4088,301 @@ export default function RubsaxWorkspace() {
                 </div>
               </section>
 
-              {/* 5. NOVO PAINEL: QUEBRA DE COMPASSO (QUEBRA DE SISTEMA NO XML) */}
+              {/* 5. SISTEMA: QUEBRA DE COMPASSO E QUEBRA DE PÁGINA (SUBGAVETAS RETRÁTEIS — LIBERADO EM TODOS OS PLANOS) */}
               <section
                 className={`${
                   mobileTab === 'layout' ? 'block' : 'hidden lg:block'
-                } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-3 text-xs`}
+                } rounded-2xl bg-studio-950/80 border border-zinc-800 p-4 space-y-2.5 text-xs`}
               >
                 <div className="flex items-center justify-between gap-2">
                   <h2 className="font-bold uppercase tracking-wider text-sax-400 flex items-center gap-1.5">
                     <SplitSquareVertical className="w-4 h-4" />
-                    <span>Quebra de Compasso (Sistema)</span>
+                    <span>Quebras do Sistema</span>
                   </h2>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
-                      {accessLevel === 'free_pass' || lineBreakMeasures.length === 0
-                        ? 'Automático'
-                        : `${lineBreakMeasures.length} quebras`}
-                    </span>
-                    {renderDrawerCornerAction({
-                      proLocked: areProDrawersLocked,
-                      modified: isBreaksModified,
-                      actionId: 'breaks-drawer-reset',
-                      onReset: handleResetBreaks,
-                    })}
-                  </div>
+                  <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-semibold">
+                    Liberado
+                  </span>
                 </div>
 
-                {areProDrawersLocked && (
-                  <button
-                    type="button"
-                    onClick={() => openPlansModal('pro')}
-                    className="w-full p-2.5 rounded-xl bg-sax-500/10 hover:bg-sax-500/20 border border-sax-500/40 text-left flex items-center justify-between gap-2 text-[11px] text-sax-200 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-                  >
-                    <span className="flex items-center gap-1.5 font-semibold leading-snug">
-                      <Lock className="w-3.5 h-3.5 text-sax-400 shrink-0" />
-                      <span>
-                        {accessLevel === 'free_pass'
-                          ? 'No Modo Gratuito a quebra de compasso é automática • PRO libera controle manual'
-                          : LOCKED_PRO_BANNER_TEXT}
-                      </span>
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-[#D97706] text-studio-950 font-extrabold shrink-0">
-                      PRO
-                    </span>
-                  </button>
-                )}
-
-                <div
-                  onClick={areProDrawersLocked ? () => openPlansModal('pro') : undefined}
-                  className={areProDrawersLocked ? 'cursor-pointer' : ''}
-                >
-                <div
-                  className={
-                    areProDrawersLocked
-                      ? 'space-y-3 opacity-40 pointer-events-none select-none'
-                      : 'space-y-3'
-                  }
-                >
-
-                {/* Opção 1 — Automático (Remover todas as quebras) */}
-                <button
-                  type="button"
-                  disabled={isSvgLoading}
-                  onClick={handleAutoSystemBreaks}
-                  className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                    systemBreakMode === 'auto' && lineBreakMeasures.length === 0
-                      ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
-                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
-                  }`}
-                >
-                  {isProcessing && activeActionId === 'break-auto' && (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  )}
-                  <span>Automático (Padrão do Motor)</span>
-                </button>
-
-                {/* Opção 2 — Quebra a cada X compassos */}
-                <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="text-[11px] font-semibold text-zinc-300">
-                      Compassos por linha (1 a 12):
-                    </label>
-                    <select
-                      value={measuresPerLineInput}
-                      onChange={(e) =>
-                        setMeasuresPerLineInput(parseInt(e.target.value, 10) || 4)
+                {/* Subgaveta Retrátil 1: Quebra de Compasso */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-zinc-900/80">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenSystemAccordions((prev) => ({ ...prev, line: !prev.line }))
                       }
-                      className="px-2.5 py-1 rounded-lg bg-studio-950 border border-zinc-700 text-xs font-mono font-bold text-sax-300 focus:outline-none focus:border-sax-500"
+                      className="flex-1 flex items-center justify-between gap-2 text-left active:scale-[0.99] transition-transform duration-75 touch-manipulation"
                     >
-                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((num) => (
-                        <option key={num} value={num}>
-                          {num} {num === 1 ? 'compasso' : 'compassos'}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={isSvgLoading}
-                    onClick={handleApplyEveryXMeasures}
-                    className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                      systemBreakMode === 'every-x'
-                        ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
-                    }`}
-                  >
-                    {isProcessing && activeActionId === 'break-every-x' && (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span className="font-bold text-zinc-100 flex items-center gap-1.5">
+                        <ChevronDown
+                          className={`w-3.5 h-3.5 text-sax-400 transition-transform ${
+                            openSystemAccordions.line ? 'rotate-180' : ''
+                          }`}
+                        />
+                        <span>Quebra de Compasso</span>
+                      </span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                        {lineBreakMeasures.length === 0
+                          ? 'Automático'
+                          : `${lineBreakMeasures.length} quebras`}
+                      </span>
+                    </button>
+                    {isLineBreaksModified && (
+                      <button
+                        type="button"
+                        disabled={isSvgLoading}
+                        onClick={handleResetLineBreaks}
+                        className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sax-300 border border-zinc-700 font-semibold shrink-0 disabled:opacity-50"
+                        title="Restaurar quebras de compasso"
+                      >
+                        Resetar
+                      </button>
                     )}
-                    <span>Aplicar a cada {measuresPerLineInput} compassos</span>
-                  </button>
+                  </div>
+
+                  {openSystemAccordions.line && (
+                    <div className="p-3 space-y-3 border-t border-zinc-800/80">
+                      {/* Opção 1 — Automático (Remover todas as quebras) */}
+                      <button
+                        type="button"
+                        disabled={isSvgLoading}
+                        onClick={handleAutoSystemBreaks}
+                        className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                          systemBreakMode === 'auto' && lineBreakMeasures.length === 0
+                            ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
+                        }`}
+                      >
+                        {isProcessing && activeActionId === 'break-auto' && (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        )}
+                        <span>Automático (Padrão do Motor)</span>
+                      </button>
+
+                      {/* Opção 2 — Quebra a cada X compassos */}
+                      <div className="p-2.5 rounded-xl bg-studio-950/80 border border-zinc-800 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-[11px] font-semibold text-zinc-300">
+                            Compassos por linha (1 a 12):
+                          </label>
+                          <select
+                            value={measuresPerLineInput}
+                            onChange={(e) =>
+                              setMeasuresPerLineInput(parseInt(e.target.value, 10) || 4)
+                            }
+                            className="px-2.5 py-1 rounded-lg bg-zinc-900 border border-zinc-700 text-xs font-mono font-bold text-sax-300 focus:outline-none focus:border-sax-500"
+                          >
+                            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((num) => (
+                              <option key={num} value={num}>
+                                {num} {num === 1 ? 'compasso' : 'compassos'}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={isSvgLoading}
+                          onClick={handleApplyEveryXMeasures}
+                          className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                            systemBreakMode === 'every-x'
+                              ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border-zinc-700'
+                          }`}
+                        >
+                          {isProcessing && activeActionId === 'break-every-x' && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
+                          <span>Aplicar a cada {measuresPerLineInput} compassos</span>
+                        </button>
+                      </div>
+
+                      {/* Opção 3 — Aplicar Quebra em Compasso Específico (Grade Interativa) */}
+                      {(analysis?.measureCount || 0) > 0 && (
+                        <div className="space-y-1.5">
+                          <p className="text-[11px] text-zinc-400 leading-snug">
+                            Clique no número do compasso para ativar/desativar uma quebra de linha
+                            após ele:
+                          </p>
+                          <div className="max-h-40 overflow-y-auto grid grid-cols-6 sm:grid-cols-8 gap-1 p-1.5 rounded-xl bg-studio-950/80 border border-zinc-800">
+                            {Array.from({ length: analysis?.measureCount || 0 }, (_, idx) => {
+                              const mNum = idx + 1;
+                              const hasBreak = lineBreakMeasures.includes(mNum);
+                              const actionId = `break-measure-${mNum}`;
+                              const isSpinning = isProcessing && activeActionId === actionId;
+                              return (
+                                <button
+                                  key={mNum}
+                                  type="button"
+                                  disabled={isSvgLoading}
+                                  onClick={() => handleToggleMeasureBreak(mNum)}
+                                  className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                                    hasBreak
+                                      ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
+                                      : 'bg-studio-950 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
+                                  }`}
+                                  title={
+                                    hasBreak
+                                      ? `Remover quebra de linha após o compasso ${mNum}`
+                                      : `Inserir quebra de linha após o compasso ${mNum}`
+                                  }
+                                >
+                                  {isSpinning ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    mNum
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                {/* Opção 3 — Aplicar Quebra em Compasso Específico (Grade Interativa) */}
-                {(analysis?.measureCount || 0) > 0 && (
-                  <div className="space-y-1.5">
-                    <p className="text-[11px] text-zinc-400 leading-snug">
-                      Clique no número do compasso para ativar/desativar uma quebra de linha após
-                      ele:
-                    </p>
-                    <div className="max-h-40 overflow-y-auto grid grid-cols-6 sm:grid-cols-8 gap-1 p-1.5 rounded-xl bg-zinc-900/90 border border-zinc-800">
-                      {Array.from({ length: analysis?.measureCount || 0 }, (_, idx) => {
-                        const mNum = idx + 1;
-                        const hasBreak = lineBreakMeasures.includes(mNum);
-                        const actionId = `break-measure-${mNum}`;
-                        const isSpinning = isProcessing && activeActionId === actionId;
-                        return (
-                          <button
-                            key={mNum}
-                            type="button"
-                            disabled={isSvgLoading}
-                            onClick={() => handleToggleMeasureBreak(mNum)}
-                            className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                              hasBreak
-                                ? 'bg-[#D97706] text-studio-950 border-sax-400 font-extrabold shadow-sm'
-                                : 'bg-studio-950 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
-                            }`}
-                            title={
-                              hasBreak
-                                ? `Remover quebra de linha após o compasso ${mNum}`
-                                : `Inserir quebra de linha após o compasso ${mNum}`
-                            }
-                          >
-                            {isSpinning ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              mNum
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
+                {/* Subgaveta Retrátil 2: Quebra de Página */}
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-zinc-900/80">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenSystemAccordions((prev) => ({ ...prev, page: !prev.page }))
+                      }
+                      className="flex-1 flex items-center justify-between gap-2 text-left active:scale-[0.99] transition-transform duration-75 touch-manipulation"
+                    >
+                      <span className="font-bold text-zinc-100 flex items-center gap-1.5">
+                        <ChevronDown
+                          className={`w-3.5 h-3.5 text-sky-400 transition-transform ${
+                            openSystemAccordions.page ? 'rotate-180' : ''
+                          }`}
+                        />
+                        <span>Quebra de Página</span>
+                      </span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
+                        {pageBreakMeasures.length === 0
+                          ? 'Automático'
+                          : `${pageBreakMeasures.length} pág.`}
+                      </span>
+                    </button>
+                    {isPageBreaksModified && (
+                      <button
+                        type="button"
+                        disabled={isSvgLoading}
+                        onClick={handleResetPageBreaks}
+                        className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-sky-300 border border-zinc-700 font-semibold shrink-0 disabled:opacity-50"
+                        title="Restaurar quebras de página"
+                      >
+                        Resetar
+                      </button>
+                    )}
                   </div>
-                )}
-                </div>
+
+                  {openSystemAccordions.page && (
+                    <div className="p-3 space-y-3 border-t border-zinc-800/80">
+                      <button
+                        type="button"
+                        disabled={isSvgLoading}
+                        onClick={handleClearPageBreaks}
+                        className={`w-full py-2 px-3 rounded-xl text-xs font-bold border flex items-center justify-center gap-1.5 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                          pageBreakMeasures.length === 0
+                            ? 'bg-sky-500 text-studio-950 border-sky-400 font-extrabold shadow-sm'
+                            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700'
+                        }`}
+                      >
+                        {isProcessing && activeActionId === 'page-break-clear' && (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        )}
+                        <span>Sem quebras manuais (Automático)</span>
+                      </button>
+
+                      {(analysis?.measureCount || 0) > 0 && (
+                        <>
+                          <div className="p-2.5 rounded-xl bg-studio-950/80 border border-zinc-800 space-y-2">
+                            <label className="block text-[11px] font-semibold text-zinc-300">
+                              Quebra de página após o compasso:
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <select
+                                value={selectedPageBreakMeasureInput}
+                                onChange={(e) =>
+                                  setSelectedPageBreakMeasureInput(
+                                    parseInt(e.target.value, 10) || 1
+                                  )
+                                }
+                                className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-xs font-mono font-bold text-sky-300 focus:outline-none focus:border-sky-500"
+                              >
+                                {Array.from(
+                                  { length: analysis?.measureCount || 0 },
+                                  (_, idx) => idx + 1
+                                ).map((mNum) => {
+                                  const active = pageBreakMeasures.includes(mNum);
+                                  return (
+                                    <option key={mNum} value={mNum}>
+                                      Compasso {mNum}
+                                      {active ? ' (com quebra)' : ''}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                              <button
+                                type="button"
+                                disabled={isSvgLoading}
+                                onClick={() =>
+                                  handleTogglePageBreakMeasure(selectedPageBreakMeasureInput)
+                                }
+                                className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-studio-950 text-xs font-extrabold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                              >
+                                {pageBreakMeasures.includes(selectedPageBreakMeasureInput)
+                                  ? 'Remover'
+                                  : 'Inserir'}
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <p className="text-[11px] text-zinc-400 leading-snug">
+                              Ou clique diretamente no compasso para inserir/remover quebra de página:
+                            </p>
+                            <div className="max-h-40 overflow-y-auto grid grid-cols-6 sm:grid-cols-8 gap-1 p-1.5 rounded-xl bg-studio-950/80 border border-zinc-800">
+                              {Array.from({ length: analysis?.measureCount || 0 }, (_, idx) => {
+                                const mNum = idx + 1;
+                                const hasBreak = pageBreakMeasures.includes(mNum);
+                                const actionId = `page-break-measure-${mNum}`;
+                                const isSpinning = isProcessing && activeActionId === actionId;
+                                return (
+                                  <button
+                                    key={mNum}
+                                    type="button"
+                                    disabled={isSvgLoading}
+                                    onClick={() => handleTogglePageBreakMeasure(mNum)}
+                                    className={`h-7 rounded-md font-mono text-[11px] font-bold border flex items-center justify-center active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
+                                      hasBreak
+                                        ? 'bg-sky-500 text-studio-950 border-sky-400 font-extrabold shadow-sm'
+                                        : 'bg-studio-950 hover:bg-zinc-800 text-zinc-300 border-zinc-700'
+                                    }`}
+                                    title={
+                                      hasBreak
+                                        ? `Remover quebra de página após o compasso ${mNum}`
+                                        : `Inserir quebra de página após o compasso ${mNum}`
+                                    }
+                                  >
+                                    {isSpinning ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      mNum
+                                    )}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               </section>
 
@@ -3420,17 +4440,19 @@ export default function RubsaxWorkspace() {
 
                 <p className="text-[11px] text-zinc-400">
                   Marque quais pautas deseja manter ativas simultaneamente na tela e no PDF (ou
-                  clique em &ldquo;Só esta&rdquo; para isolar uma única parte):
+                  clique em &ldquo;Só esta&rdquo; para isolar uma única parte). Pautas duplas (como
+                  Piano) já vêm agrupadas juntas:
                 </p>
 
                 <div className="space-y-1.5">
-                  {(analysis?.staves || []).map((st) => {
+                  {(analysis?.staves || []).map((st, idx) => {
                     const isActiveInSelection =
-                      viewMode === 'full-score' || selectedStaffIds.includes(st.staffId);
+                      effectiveViewMode === 'full-score' ||
+                      effectiveSelectedStaffIds.includes(st.staffId);
                     const isIsolatedOnly =
-                      viewMode !== 'full-score' &&
-                      selectedStaffIds.length === 1 &&
-                      selectedStaffIds[0] === st.staffId;
+                      effectiveViewMode !== 'full-score' &&
+                      effectiveSelectedStaffIds.length === 1 &&
+                      effectiveSelectedStaffIds[0] === st.staffId;
                     const toggleActionId = `staff-toggle-${st.staffId}`;
                     const soloActionId = `staff-solo-${st.staffId}`;
                     const isToggling = isProcessing && activeActionId === toggleActionId;
@@ -3452,8 +4474,8 @@ export default function RubsaxWorkspace() {
                           className="flex items-center gap-2.5 flex-1 text-left truncate active:scale-[0.98] transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
                           title={
                             isActiveInSelection
-                              ? 'Clique para ocultar esta pauta'
-                              : 'Clique para ativar esta pauta junto com as selecionadas'
+                              ? 'Clique para ocultar esta parte'
+                              : 'Clique para ativar esta parte junto com as selecionadas'
                           }
                         >
                           <span
@@ -3470,7 +4492,7 @@ export default function RubsaxWorkspace() {
                             )}
                           </span>
                           <span className="font-semibold text-xs truncate">
-                            Pauta {st.staffId}: {st.displayName}
+                            Parte {idx + 1}: {st.partSelectorLabel}
                           </span>
                         </button>
 
@@ -3483,7 +4505,7 @@ export default function RubsaxWorkspace() {
                               ? 'bg-[#D97706] text-studio-950 font-extrabold shadow-sm'
                               : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
                           }`}
-                          title="Exibir apenas esta pauta isolada"
+                          title="Exibir apenas esta parte isolada"
                         >
                           {isSoloing && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
                           <span>{isIsolatedOnly ? 'Isolada' : 'Só esta'}</span>
@@ -3498,7 +4520,7 @@ export default function RubsaxWorkspace() {
                       disabled={isSvgLoading}
                       onClick={() => handleChangeViewMode('full-score')}
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-left active:scale-[0.99] transition-transform duration-75 touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed ${
-                        viewMode === 'full-score'
+                        effectiveViewMode === 'full-score'
                           ? 'bg-[#D97706] border-sax-400 text-studio-950 font-extrabold shadow-sm'
                           : 'bg-zinc-900/80 hover:bg-zinc-800/80 border-zinc-800 text-zinc-300'
                       }`}
@@ -3509,22 +4531,22 @@ export default function RubsaxWorkspace() {
                         ) : (
                           <FileText
                             className={`w-3.5 h-3.5 ${
-                              viewMode === 'full-score' ? 'text-studio-950' : 'text-sax-400'
+                              effectiveViewMode === 'full-score' ? 'text-studio-950' : 'text-sax-400'
                             }`}
                           />
                         )}
                         <span className="font-semibold text-xs">
-                          Grade Completa ({analysis?.staves.length || 0} pautas empilhadas)
+                          Grade Completa ({analysis?.staves.length || 0} instrumentos empilhados)
                         </span>
                       </div>
                       <span
                         className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
-                          viewMode === 'full-score'
+                          effectiveViewMode === 'full-score'
                             ? 'bg-black/20 text-studio-950'
                             : 'bg-zinc-800 text-zinc-400'
                         }`}
                       >
-                        {viewMode === 'full-score' ? 'Ativa' : 'Empilhar'}
+                        {effectiveViewMode === 'full-score' ? 'Ativa' : 'Empilhar'}
                       </span>
                     </button>
                   )}
@@ -3559,7 +4581,7 @@ export default function RubsaxWorkspace() {
                   const f = e.dataTransfer.files?.[0];
                   if (f) void handleFileUpload(f);
                 }}
-                className="flex-1 flex items-center justify-center p-4 sm:p-8"
+                className="flex-1 flex flex-col items-center justify-center gap-6 p-4 sm:p-8 overflow-y-auto"
               >
                 <div
                   className={`w-full max-w-xl rounded-3xl border-2 border-dashed p-6 sm:p-10 text-center transition-all shadow-2xl space-y-5 ${
@@ -3577,8 +4599,9 @@ export default function RubsaxWorkspace() {
                     </h2>
                     <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
                       Envie ou arraste um arquivo <code className="text-sax-300">.mscz</code>,{' '}
-                      <code className="text-sax-300">.mscx</code> ou{' '}
-                      <code className="text-sax-300">.xml</code> para liberar o visor vetorial e
+                      <code className="text-sax-300">.mscx</code>,{' '}
+                      <code className="text-sax-300">.xml</code> ou{' '}
+                      <code className="text-sax-300">.mxl</code> para liberar o visor vetorial e
                       todas as ferramentas do estúdio.
                     </p>
                   </div>
@@ -3619,9 +4642,11 @@ export default function RubsaxWorkspace() {
                     }`}
                   >
                     <Upload className="w-4 h-4" />
-                    <span>Enviar Partitura (.mscz, .mscx, .xml)</span>
+                    <span>Enviar Partitura (.mscz, .mscx, .xml, .mxl)</span>
                   </button>
                 </div>
+
+                {renderRecentProjectsSection()}
               </div>
             ) : (
               <ScoreViewer
@@ -3631,10 +4656,16 @@ export default function RubsaxWorkspace() {
                 originalBase64={originalBase64}
                 fileName={analysis.fileName}
                 semitoneShift={semitoneShift}
-                octaveShift={octaveShift}
+                octaveShift={currentPartOctaveShift}
+                lineBreakMeasures={lineBreakMeasures}
+                pageBreakMeasures={pageBreakMeasures}
+                totalPartsCount={analysis.staves.length}
+                firstPartNoticeLabel={
+                  analysis.staves[0]?.partSelectorLabel || analysis.detectedInstrumentName
+                }
                 canvasTheme={canvasTheme}
                 onThemeChange={setCanvasTheme}
-                viewMode={viewMode}
+                viewMode={effectiveViewMode}
                 onViewModeChange={handleChangeViewMode}
                 floatingTexts={floatingTexts}
                 onUpdateFloatingTextPosition={handleUpdateFloatingTextPosition}
@@ -3745,6 +4776,7 @@ export default function RubsaxWorkspace() {
         googleNextPath={workspaceView === 'editor' ? '/?view=editor' : '/'}
         onAuthenticated={(u) => {
           setAuthUser(u);
+          setAuthUserImmediate(u);
           void refreshAuthAndSettings(fileHash, 'if-access-changed');
           if (pendingPlanIntent) {
             openPlansModal('pro');
@@ -3805,6 +4837,7 @@ export default function RubsaxWorkspace() {
         onAccountDeleted={() => {
           setAccountModalOpen(false);
           setAuthUser(null);
+          setAuthUserImmediate(null);
           setIsDev(false);
           accessLevelRef.current = 'preview';
           setAccessLevel('preview');
@@ -3854,51 +4887,107 @@ export default function RubsaxWorkspace() {
         </div>
       )}
 
-      {/* MODAL CENTRALIZADO DE CONFERÊNCIA: PROCESSAMENTO EM ANDAMENTO ANTES DE EXPORTAR PDF */}
+      {/* MODAL CENTRALIZADO DE CONFERÊNCIA: ALTERAÇÕES PENDENTES OU PROCESSAMENTO ANTES DE EXPORTAR PDF */}
       {showUnappliedChangesModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
           <div className="w-full max-w-lg rounded-2xl bg-studio-900 border-2 border-sax-500/50 shadow-2xl overflow-hidden text-zinc-100">
-            <div className="flex items-center gap-3 px-5 py-4 bg-gradient-to-r from-sax-600/25 via-sax-500/15 to-transparent border-b border-zinc-800">
-              <div className="p-2.5 rounded-xl bg-sax-500/20 border border-sax-500/40 text-sax-400">
-                <AlertCircle className="w-6 h-6" />
-              </div>
-              <div>
-                <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sax-500/20 text-sax-300 border border-sax-500/30 mb-0.5">
-                  Conferência Antes do Download
-                </span>
-                <h3 className="text-base sm:text-lg font-extrabold text-white">
-                  Atualização Visual em Andamento
-                </h3>
-              </div>
-            </div>
+            {pendingUnappliedItems.length > 0 ? (
+              <>
+                <div className="flex items-center gap-3 px-5 py-4 bg-gradient-to-r from-amber-600/25 via-sax-500/15 to-transparent border-b border-zinc-800">
+                  <div className="p-2.5 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-400">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 mb-0.5">
+                      Alterações Não Aplicadas
+                    </span>
+                    <h3 className="text-base sm:text-lg font-extrabold text-white">
+                      Confirme suas edições antes do PDF
+                    </h3>
+                  </div>
+                </div>
 
-            <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-2">
-              <p>
-                A visualização na tela ainda está finalizando a última alteração automática. Deseja
-                aguardar na tela ou gerar o PDF imediatamente?
-              </p>
-            </div>
+                <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-3">
+                  <p>
+                    Há edições digitadas que ainda não foram aplicadas na visualização da partitura:
+                  </p>
+                  <ul className="rounded-xl bg-studio-950 border border-zinc-800 divide-y divide-zinc-800/80 text-xs font-semibold text-amber-200">
+                    {pendingUnappliedItems.map((item) => (
+                      <li key={item.id} className="px-3.5 py-2 flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
+                        <span>{item.label}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-xs text-zinc-400">
+                    Você pode aplicar todas essas alterações automaticamente e exportar o PDF em
+                    seguida, ou voltar para revisar na tela.
+                  </p>
+                </div>
 
-            <div className="px-5 py-4 bg-studio-950 border-t border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowUnappliedChangesModal(false)}
-                className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-              >
-                Aguardar na Tela
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowUnappliedChangesModal(false);
-                  void executeExportPdf();
-                }}
-                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
-              >
-                <FileDown className="w-3.5 h-3.5" />
-                <span>Gerar PDF Agora</span>
-              </button>
-            </div>
+                <div className="px-5 py-4 bg-studio-950 border-t border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowUnappliedChangesModal(false)}
+                    className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    Voltar para revisar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApplyAllPendingAndExportPdf}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Aplicar tudo e Exportar PDF</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center gap-3 px-5 py-4 bg-gradient-to-r from-sax-600/25 via-sax-500/15 to-transparent border-b border-zinc-800">
+                  <div className="p-2.5 rounded-xl bg-sax-500/20 border border-sax-500/40 text-sax-400">
+                    <AlertCircle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-sax-500/20 text-sax-300 border border-sax-500/30 mb-0.5">
+                      Conferência Antes do Download
+                    </span>
+                    <h3 className="text-base sm:text-lg font-extrabold text-white">
+                      Atualização Visual em Andamento
+                    </h3>
+                  </div>
+                </div>
+
+                <div className="p-5 text-sm text-zinc-300 leading-relaxed space-y-2">
+                  <p>
+                    A visualização na tela ainda está finalizando a última alteração automática.
+                    Deseja aguardar na tela ou gerar o PDF imediatamente?
+                  </p>
+                </div>
+
+                <div className="px-5 py-4 bg-studio-950 border-t border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowUnappliedChangesModal(false)}
+                    className="px-4 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    Aguardar na Tela
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowUnappliedChangesModal(false);
+                      void executeExportPdf();
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sax-500 hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    <span>Gerar PDF Agora</span>
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -1,5 +1,11 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { AuthProvider, type InitialAuthPayload } from '@/components/AuthProvider';
+import { resolveUserAccessSnapshot } from '@/lib/access';
+import { DEFAULT_APP_SETTINGS } from '@/lib/settings';
+import { getServerSessionUser, isAdminEmail } from '@/lib/supabase/server';
+
+export const dynamic = 'force-dynamic';
 
 const SITE_URL = 'https://app.rubsax.com.br';
 const SITE_TITLE =
@@ -70,15 +76,63 @@ const webAppStructuredData = {
     'Ferramenta online para transposição e edição de partituras nos formatos MuseScore e MusicXML.',
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  let initialAuth: InitialAuthPayload = {
+    user: null,
+    isDev: false,
+    accessLevel: 'preview',
+    activeSubscription: null,
+    activeSingleUnlocks: [],
+    freePassStatus: null,
+    settings: DEFAULT_APP_SETTINGS,
+  };
+
+  try {
+    const user = await getServerSessionUser();
+    const isDev = user ? isAdminEmail(user.email) : false;
+    const snapshot = await resolveUserAccessSnapshot(user, null);
+
+    initialAuth = {
+      user,
+      isDev,
+      accessLevel: snapshot.access.level,
+      activeSubscription: snapshot.activeSubscription,
+      activeSingleUnlocks: snapshot.activeSingleUnlocks,
+      freePassStatus: snapshot.freePassStatus,
+      settings: {
+        ...DEFAULT_APP_SETTINGS,
+        pricing: snapshot.settings.pricing,
+        paywall: snapshot.settings.paywall,
+        announcement: snapshot.settings.announcement,
+        operations: {
+          ...DEFAULT_APP_SETTINGS.operations,
+          maintenance_mode: snapshot.settings.operations.maintenance_mode,
+          maintenance_message: snapshot.settings.operations.maintenance_message,
+          monthly_pdf_fair_use_limit: snapshot.settings.operations.monthly_pdf_fair_use_limit,
+        },
+        support_links: snapshot.settings.support_links,
+        tutorial: snapshot.settings.tutorial,
+        free_pass: {
+          ...DEFAULT_APP_SETTINGS.free_pass,
+          enabled: snapshot.settings.free_pass.enabled,
+          cooldown_days: snapshot.settings.free_pass.cooldown_days,
+          unlock_hours: snapshot.settings.free_pass.unlock_hours,
+          pdf_watermark_enabled: snapshot.settings.free_pass.pdf_watermark_enabled,
+        },
+      },
+    };
+  } catch {
+    // Fallback seguro mantendo default não autenticado
+  }
+
   return (
     <html lang="pt-BR" className="dark">
       <body className="antialiased min-h-screen bg-studio-950 text-zinc-100">
-        {children}
+        <AuthProvider initialAuth={initialAuth}>{children}</AuthProvider>
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{

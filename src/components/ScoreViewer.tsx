@@ -32,6 +32,10 @@ interface ScoreViewerProps {
   fileName: string;
   semitoneShift: number;
   octaveShift: number;
+  lineBreakMeasures?: number[];
+  pageBreakMeasures?: number[];
+  totalPartsCount?: number;
+  firstPartNoticeLabel?: string;
   canvasTheme: CanvasThemeMode;
   onThemeChange: (theme: CanvasThemeMode) => void;
   viewMode: ScoreLayoutViewMode;
@@ -70,6 +74,10 @@ export default function ScoreViewer({
   fileName,
   semitoneShift,
   octaveShift,
+  lineBreakMeasures,
+  pageBreakMeasures,
+  totalPartsCount = 1,
+  firstPartNoticeLabel = '',
   canvasTheme,
   onThemeChange,
   viewMode,
@@ -125,20 +133,50 @@ export default function ScoreViewer({
 
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch('/api/render-svg', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            originalBase64,
-            fileName,
-            modifiedMscx,
-            semitoneShift,
-            octaveShift,
-          }),
+        const requestRender = async () => {
+          const res = await fetch('/api/render-svg', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+              originalBase64,
+              fileName,
+              modifiedMscx,
+              semitoneShift,
+              octaveShift,
+              lineBreakMeasures,
+              pageBreakMeasures,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          return { res, data };
+        };
+
+        let attempt = await requestRender().catch((firstErr) => {
+          if (controller.signal.aborted || cancelled) throw firstErr;
+          console.error('[ScoreViewer] Falha ao renderizar SVG (tentativa 1):', firstErr);
+          return null;
         });
-        const data = await res.json();
-        if (cancelled) return;
+
+        if (
+          !cancelled &&
+          !controller.signal.aborted &&
+          (!attempt || (!attempt.res.ok && attempt.res.status >= 500))
+        ) {
+          if (attempt) {
+            console.error('[ScoreViewer] Resposta 5xx ao renderizar SVG (tentativa 1):', {
+              status: attempt.res.status,
+              error: attempt.data?.error,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 600));
+          if (!cancelled && !controller.signal.aborted) {
+            attempt = await requestRender();
+          }
+        }
+
+        if (cancelled || !attempt) return;
+        const { res, data } = attempt;
         if (!res.ok || !data.pages || data.pages.length === 0) {
           throw new Error(
             data.error || 'Não foi possível gerar a visualização pelo MuseScore 3.'
@@ -165,6 +203,7 @@ export default function ScoreViewer({
         onPreviewStateChange?.({ isPreview: nextIsPreview, totalPages: nextTotalPages });
       } catch (err: unknown) {
         if (cancelled || controller.signal.aborted) return;
+        console.error('[ScoreViewer] Erro final ao renderizar SVG:', err);
         const msg =
           err instanceof Error ? err.message : 'Erro ao renderizar partitura via MuseScore 3.';
         setSvgError(msg);
@@ -646,7 +685,7 @@ export default function ScoreViewer({
                 className="text-emerald-300"
               />
               <span className="text-[11px] text-emerald-200/85">
-                • Só Tom/Oitava e quebra automática (PDF com rodapé)
+                • Tom/Oitava e Quebras na 1ª parte (PDF com rodapé)
               </span>
             </div>
             <button
@@ -655,6 +694,29 @@ export default function ScoreViewer({
               className="px-2.5 py-1 rounded-lg bg-[#D97706] hover:bg-sax-400 text-studio-950 text-[11px] font-extrabold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
             >
               Liberar Completo (PRO)
+            </button>
+          </div>
+        )}
+
+      {/* Visor discreto de Aviso de Pautas Ocultas (exclusivo Visitante e Modo Gratuito) */}
+      {!isFullscreen &&
+        (accessLevel === 'preview' || accessLevel === 'free_pass') &&
+        totalPartsCount > 1 && (
+          <div className="px-3 sm:px-4 py-2 bg-amber-950/45 border-b border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-100">
+            <span className="flex items-center gap-1.5 leading-snug">
+              <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>
+                Este arquivo possui <strong>{totalPartsCount} instrumentos</strong>. Você está
+                visualizando apenas a <strong>1ª parte</strong>
+                {firstPartNoticeLabel ? ` (${firstPartNoticeLabel})` : ''} no modo atual.
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onOpenPlansModal?.('pro')}
+              className="text-[11px] font-extrabold text-sax-300 hover:text-sax-200 underline underline-offset-2 shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+            >
+              Ver planos PRO
             </button>
           </div>
         )}
@@ -751,12 +813,12 @@ export default function ScoreViewer({
                               Passe Gratuito
                             </span>
                             <h4 className="text-sm sm:text-base font-extrabold text-white">
-                              Liberar Grátis (1 música / {freePassSettings.cooldown_days}{' '}
-                              {freePassSettings.cooldown_days === 1 ? 'dia' : 'dias'})
+                              1 música grátis a cada {freePassSettings.cooldown_days}{' '}
+                              {freePassSettings.cooldown_days === 1 ? 'dia' : 'dias'}
                             </h4>
                             <p className="text-[11px] text-zinc-300 leading-relaxed">
-                              Só tom e oitava • {freePassSettings.unlock_hours}h para editar •
-                              quebra automática • exige login
+                              {freePassSettings.unlock_hours}h para editar e baixar • Tom, Oitava e
+                              Quebras (1ª parte) • exige login
                             </p>
                           </div>
 

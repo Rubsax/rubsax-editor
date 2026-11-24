@@ -30,6 +30,24 @@ body {
   animation: fadeIn 0.18s ease-out forwards;
 }
 
+@keyframes rubsax-spin {
+  from {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(0, 0, 0) rotate(360deg);
+  }
+}
+
+/* Mantém spinners suaves e acelerados por GPU mesmo em navegadores móveis */
+.animate-spin {
+  animation: rubsax-spin 0.8s linear infinite !important;
+  will-change: transform;
+  transform-origin: center center;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
 /* Customização de barra de rolagem escura e discreta */
 ::-webkit-scrollbar {
   width: 8px;

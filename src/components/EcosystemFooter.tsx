@@ -14,6 +14,7 @@ import {
   X,
   FileText,
   HelpCircle,
+  CreditCard,
 } from 'lucide-react';
 
 interface EcosystemFooterProps {
@@ -88,6 +89,15 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
                     <Info className="w-3.5 h-3.5 text-sax-400 shrink-0" />
                     <span>Sobre Nós (Nossa Missão)</span>
                   </button>
+                </li>
+                <li>
+                  <Link
+                    href="/planos"
+                    className="inline-flex items-center gap-2 text-zinc-300 hover:text-sax-300 transition"
+                  >
+                    <CreditCard className="w-3.5 h-3.5 text-sax-400 shrink-0" />
+                    <span>Nossos Planos</span>
+                  </Link>
                 </li>
                 <li>
                   <Link
@@ -239,7 +249,7 @@ export default function EcosystemFooter({ supportLinks }: EcosystemFooterProps) 
             <div className="p-5 sm:p-6 space-y-3.5 text-xs sm:text-sm text-zinc-300 leading-relaxed max-h-[70vh] overflow-y-auto">
               <p>
                 A <strong className="text-sax-400">Rubsax Partituras</strong> nasceu com a missão de
-                democratizar o acesso a partituras digitais de alta fidelidade e ferramentas
+                facilitar o acesso a partituras digitais gospel de alta fidelidade e ferramentas
                 inteligentes de transposição e estudo, unindo precisão musical e tecnologia de ponta
                 para músicos em todo o Brasil.
               </p>
