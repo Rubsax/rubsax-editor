@@ -1,10 +1,15 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveUserAccessSnapshot } from '@/lib/access';
+import { isOfficialDemoHash } from '@/lib/demo-score';
 import {
   buildModifiedMsczBuffer,
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
+import {
+  ensureDemoCachePrewarmStarted,
+  getOrRenderDemoSvgPages,
+} from '@/lib/server/demo-svg-cache';
 import { buildFreePassRestrictedMsczBuffer } from '@/lib/server/free-pass-transform';
 import { runMuseScoreHeadlessSvgPages } from '@/lib/server/musescore-cli';
 import { logUsage } from '@/lib/supabase/admin';
@@ -55,6 +60,8 @@ export async function POST(req: NextRequest) {
       .update(rawBuffer)
       .digest('hex');
 
+    ensureDemoCachePrewarmStarted();
+
     const user = await getServerSessionUser();
     const { access, settings } = await resolveUserAccessSnapshot(
       user,
@@ -69,6 +76,34 @@ export async function POST(req: NextRequest) {
         },
         { status: 503 }
       );
+    }
+
+    // Arquivo oficial de demonstração ("Parabéns pra Você"): libera visualização completa com cache em disco
+    if (isOfficialDemoHash(resolvedFileHash)) {
+      if (!modifiedMscx) {
+        return NextResponse.json(
+          { error: 'Parâmetros insuficientes para renderização SVG.' },
+          { status: 400 }
+        );
+      }
+
+      const { pages: demoSvgPages, fromCache } = await getOrRenderDemoSvgPages(
+        rawBuffer,
+        fileName,
+        modifiedMscx
+      );
+
+      return NextResponse.json({
+        pages: demoSvgPages,
+        pageCount: demoSvgPages.length,
+        totalPages: demoSvgPages.length,
+        isPreview: false,
+        isDemo: true,
+        fromCache,
+        accessLevel: access.level,
+        isDev: access.isDev,
+        fileHash: resolvedFileHash,
+      });
     }
 
     let msczBuffer: Buffer;

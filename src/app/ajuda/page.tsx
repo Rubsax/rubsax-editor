@@ -239,22 +239,25 @@ export default async function AjudaPage() {
             </div>
 
             <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
-              <p className="font-bold text-white">Enviar Arquivo &amp; Fechar Partitura</p>
+              <p className="font-bold text-white">Enviar Arquivo, Testar App &amp; Fechar Partitura</p>
               <p className="text-zinc-400 leading-relaxed">
-                Envie novos arquivos <code className="text-sax-300">.mscz</code>,{' '}
+                Envie arquivos <code className="text-sax-300">.mscz</code>,{' '}
                 <code className="text-sax-300">.mscx</code>,{' '}
                 <code className="text-sax-300">.xml</code> ou{' '}
-                <code className="text-sax-300">.mxl</code> a qualquer momento ou feche a partitura
-                atual na barra lateral para acessar os Projetos Recentes.
+                <code className="text-sax-300">.mxl</code>, experimente gratuitamente todas as 5
+                gavetas no botão <strong>Testar App</strong> da tela inicial ou clique em{' '}
+                <strong>Fechar Partitura</strong> no topo (PC e celular) para voltar aos Projetos
+                Recentes.
               </p>
             </div>
 
             <div className="p-3.5 rounded-2xl bg-studio-950/80 border border-zinc-800 space-y-1">
-              <p className="font-bold text-white">Exportar PDF &amp; Minha Conta</p>
+              <p className="font-bold text-white">Exportar PDF, Minha Conta &amp; Meus Projetos</p>
               <p className="text-zinc-400 leading-relaxed">
-                Gera o PDF final via MuseScore 3 e alerta automaticamente se existir alguma edição
-                digitada em Textos ou Cifras sem clicar em <strong>Aplicar</strong>. Em{' '}
-                <strong>Minha Conta</strong> você gerencia seu acesso e plano PRO.
+                Gera o PDF final via MuseScore 3 e alerta automaticamente se existir edição digitada
+                sem clicar em <strong>Aplicar</strong>. Em <strong>Minha Conta</strong> e na Área do
+                Cliente você acessa a aba <strong>Meus Projetos</strong> com os últimos 5 arquivos
+                salvos neste dispositivo.
               </p>
             </div>
           </div>

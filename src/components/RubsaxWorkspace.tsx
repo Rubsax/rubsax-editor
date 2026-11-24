@@ -43,6 +43,11 @@ import {
   saveWorkspaceSession,
   setActiveTabProjectHash,
 } from '@/lib/workspace-storage';
+import {
+  DEMO_SCORE_FILE_NAME,
+  DEMO_SCORE_PUBLIC_URL,
+  isOfficialDemoHash,
+} from '@/lib/demo-score';
 import { recordInternalRoute } from '@/lib/nav-history';
 import { useAuth } from './AuthProvider';
 import FreePassCountdown from './FreePassCountdown';
@@ -87,6 +92,7 @@ import {
   Clock,
   CreditCard,
   FileSpreadsheet,
+  Sparkles,
 } from 'lucide-react';
 
 const LOCKED_PRO_BANNER_TEXT =
@@ -176,7 +182,12 @@ export default function RubsaxWorkspace() {
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
   const [accountModalOpen, setAccountModalOpen] = useState<boolean>(false);
+  const [accountModalInitialTab, setAccountModalInitialTab] =
+    useState<'account' | 'projects'>('account');
   const [tutorialModalOpen, setTutorialModalOpen] = useState<boolean>(false);
+  const [isLoadingDemo, setIsLoadingDemo] = useState<boolean>(false);
+  const [showDemoPdfBlockedModal, setShowDemoPdfBlockedModal] =
+    useState<boolean>(false);
   const [pendingPlanIntent, setPendingPlanIntent] =
     useState<PlanCheckoutKind | null>(null);
 
@@ -614,9 +625,15 @@ export default function RubsaxWorkspace() {
     recordInternalRoute(workspaceView === 'editor' ? '/?view=editor' : '/?view=home');
   }, [workspaceView, isRestoringSession]);
 
-  // Auto-salva a partitura e edições atuais na lista de Projetos Recentes do IndexedDB
+  // Auto-salva a partitura e edições atuais na lista de Projetos Recentes do IndexedDB (nunca salva o arquivo Demo)
   useEffect(() => {
-    if (!isSessionHydratedRef.current || !analysis || !originalBase64 || !originalMscx) {
+    if (
+      !isSessionHydratedRef.current ||
+      !analysis ||
+      !originalBase64 ||
+      !originalMscx ||
+      isOfficialDemoHash(fileHash)
+    ) {
       return;
     }
     const timer = setTimeout(() => {
@@ -812,7 +829,11 @@ export default function RubsaxWorkspace() {
   }, [copyrightAccepted]);
 
   const loadScoreFromBuffer = useCallback(
-    async (arrayBuf: ArrayBuffer, fileName: string) => {
+    async (
+      arrayBuf: ArrayBuffer,
+      fileName: string,
+      loadOptions?: { skipConsentAndRecent?: boolean }
+    ) => {
       if (isUploadingLockRef.current) return;
       setUploadError(null);
       if (appSettings.operations.maintenance_mode && !isDev) {
@@ -834,19 +855,23 @@ export default function RubsaxWorkspace() {
       try {
         await yieldToMainThread();
         const computedHash = await computeFileSha256Hex(arrayBuf);
+        const isDemoModeFile =
+          Boolean(loadOptions?.skipConsentAndRecent) || isOfficialDemoHash(computedHash);
         setFileHash(computedHash);
         fileHashRef.current = computedHash;
 
-        // Registra aceite de direitos autorais vinculado ao hash do arquivo
-        void fetch('/api/consent', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            consentType: 'copyright_upload',
-            termsVersion: 'v1.4',
-            fileHash: computedHash,
-          }),
-        }).catch(() => {});
+        // Registra aceite de direitos autorais vinculado ao hash do arquivo real (não para a demo oficial)
+        if (!isDemoModeFile) {
+          void fetch('/api/consent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              consentType: 'copyright_upload',
+              termsVersion: 'v1.4',
+              fileHash: computedHash,
+            }),
+          }).catch(() => {});
+        }
 
         const authPromise = refreshAuthAndSettings(computedHash, 'none');
 
@@ -893,6 +918,7 @@ export default function RubsaxWorkspace() {
         const mePayload = await authPromise;
         const resolvedLevel = mePayload?.accessLevel || accessLevelRef.current;
         const startInAutoBreakMode =
+          !isDemoModeFile &&
           !isDev &&
           appSettings.paywall.paywall_enabled !== false &&
           (resolvedLevel === 'preview' || resolvedLevel === 'free_pass');
@@ -931,7 +957,7 @@ export default function RubsaxWorkspace() {
         );
 
         skipNextAutoTransformRef.current = true;
-        setActiveTabProjectHash(computedHash || `name:${fileName}`);
+        setActiveTabProjectHash(isDemoModeFile ? null : computedHash || `name:${fileName}`);
         setOriginalBase64(b64);
         setOriginalMscx(unpacked.mscxContent);
         setAnalysis(scoreAnalysis);
@@ -1021,6 +1047,44 @@ export default function RubsaxWorkspace() {
     [ensureCopyrightAccepted, loadScoreFromBuffer]
   );
 
+  const handleLoadOfficialDemo = useCallback(async () => {
+    if (isLoadingDemo || isUploadingLockRef.current || isLoadingFile) return;
+    setUploadError(null);
+    setIsLoadingDemo(true);
+    try {
+      const res = await fetch(DEMO_SCORE_PUBLIC_URL, { cache: 'force-cache' });
+      if (!res.ok) {
+        throw new Error('Não foi possível baixar a partitura de demonstração agora.');
+      }
+      const buf = await res.arrayBuffer();
+      await loadScoreFromBuffer(buf, DEMO_SCORE_FILE_NAME, {
+        skipConsentAndRecent: true,
+      });
+    } catch (err: unknown) {
+      setUploadError(
+        err instanceof Error
+          ? err.message
+          : 'Erro ao abrir a partitura de demonstração.'
+      );
+    } finally {
+      setIsLoadingDemo(false);
+    }
+  }, [isLoadingDemo, isLoadingFile, loadScoreFromBuffer]);
+
+  const handleStartOwnUploadFromDemo = useCallback(() => {
+    setShowDemoPdfBlockedModal(false);
+    if (copyrightAccepted) {
+      fileInputRef.current?.click();
+      return;
+    }
+    handleCloseCurrentScore();
+    setWorkspaceView('editor');
+    setCopyrightError(true);
+    setUploadError(
+      'Para enviar sua própria partitura, aceite a declaração de direitos autorais (Lei nº 9.610/98) abaixo.'
+    );
+  }, [copyrightAccepted, handleCloseCurrentScore]);
+
   const handleSelectTargetConcertPitchClass = (targetPc: number) => {
     if (!analysis || isSvgLoading) return;
     const origPc = analysis.originalConcertPitchClass;
@@ -1032,7 +1096,9 @@ export default function RubsaxWorkspace() {
     setSemitoneShift(shift);
   };
 
+  const isDemoScore = isOfficialDemoHash(fileHash);
   const areProDrawersLocked =
+    !isDemoScore &&
     !isDev &&
     appSettings.paywall.paywall_enabled !== false &&
     (accessLevel === 'preview' || accessLevel === 'free_pass');
@@ -1853,6 +1919,10 @@ export default function RubsaxWorkspace() {
 
   const handleRequestExportPdf = () => {
     if (isExportingPdf || isExportingLockRef.current) return;
+    if (isDemoScore) {
+      setShowDemoPdfBlockedModal(true);
+      return;
+    }
     if (isPreviewLocked) {
       openPlansModal('pro');
       return;
@@ -2184,6 +2254,7 @@ export default function RubsaxWorkspace() {
                         type="button"
                         onClick={() => {
                           setUserMenuOpen(false);
+                          setAccountModalInitialTab('account');
                           setAccountModalOpen(true);
                         }}
                         className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
@@ -2191,13 +2262,32 @@ export default function RubsaxWorkspace() {
                         <User className="w-3.5 h-3.5 text-sax-400" />
                         <span>Minha Conta</span>
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUserMenuOpen(false);
+                          setAccountModalInitialTab('projects');
+                          setAccountModalOpen(true);
+                        }}
+                        className="w-full px-3.5 py-2 text-left hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center justify-between gap-2 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <FolderOpen className="w-3.5 h-3.5 text-sax-400" />
+                          <span>Meus Projetos</span>
+                        </span>
+                        {recentProjects.length > 0 && (
+                          <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] font-mono text-sax-300">
+                            {recentProjects.length}
+                          </span>
+                        )}
+                      </button>
                       <Link
                         href="/conta"
                         onClick={() => setUserMenuOpen(false)}
                         className="w-full px-3.5 py-2 hover:bg-zinc-800 text-zinc-300 font-medium flex items-center gap-2"
                       >
                         <Crown className="w-3.5 h-3.5 text-sax-400" />
-                        <span>Meu Plano &amp; Avulsos</span>
+                        <span>Área do Cliente &amp; Planos</span>
                       </Link>
                       {isDev && (
                         <Link
@@ -2259,11 +2349,26 @@ export default function RubsaxWorkspace() {
 
           {/* Ações Rápidas no Topo */}
           {analysis && workspaceView === 'editor' && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleCloseCurrentScore}
+                title="Fechar partitura atual e voltar para a tela limpa do Editor / Projetos Recentes"
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl bg-red-950/45 hover:bg-red-900/60 text-red-200 text-xs font-bold border border-red-500/40 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+              >
+                <X className="w-3.5 h-3.5 text-red-400" />
+                <span className="hidden sm:inline">Fechar Partitura</span>
+                <span className="sm:hidden">Fechar</span>
+              </button>
+
               <button
                 type="button"
                 disabled={isSvgLoading}
                 onClick={() => {
+                  if (isDemoScore && !copyrightAccepted) {
+                    handleStartOwnUploadFromDemo();
+                    return;
+                  }
                   if (!ensureCopyrightAccepted()) return;
                   fileInputRef.current?.click();
                 }}
@@ -2279,7 +2384,9 @@ export default function RubsaxWorkspace() {
                 disabled={isExportingPdf}
                 onClick={handleRequestExportPdf}
                 title={
-                  isPreviewLocked
+                  isDemoScore
+                    ? 'Exportar PDF fica bloqueado apenas na partitura de demonstração'
+                    : isPreviewLocked
                     ? 'Modo Prévia: desbloqueie a partitura para exportar em PDF'
                     : 'Exportar PDF fiel pelo MuseScore 3'
                 }
@@ -2292,7 +2399,7 @@ export default function RubsaxWorkspace() {
                   </>
                 ) : (
                   <>
-                    {isPreviewLocked ? (
+                    {isPreviewLocked || isDemoScore ? (
                       <Lock className="w-4 h-4" />
                     ) : (
                       <FileDown className="w-4 h-4" />
@@ -2473,22 +2580,45 @@ export default function RubsaxWorkspace() {
                   )}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (!ensureCopyrightAccepted()) return;
-                    fileInputRef.current?.click();
-                  }}
-                  className={`inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
-                    copyrightAccepted
-                      ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
-                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600 shadow-none'
-                  }`}
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Selecionar Arquivo (.mscz, .mscx, .xml, .mxl)</span>
-                </button>
+                <div className="flex flex-col items-center gap-2.5 w-full">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!ensureCopyrightAccepted()) return;
+                      fileInputRef.current?.click();
+                    }}
+                    className={`inline-flex items-center gap-2.5 px-6 py-3.5 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
+                      copyrightAccepted
+                        ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
+                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600 shadow-none'
+                    }`}
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Selecionar Arquivo (.mscz, .mscx, .xml, .mxl)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isLoadingDemo || isLoadingFile}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleLoadOfficialDemo();
+                    }}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/45 text-emerald-200 text-xs sm:text-sm font-extrabold shadow-sm disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                  >
+                    {isLoadingDemo ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-emerald-300" />
+                    ) : (
+                      <Sparkles className="w-4 h-4 text-emerald-300" />
+                    )}
+                    <span>Testar App Agora (Partitura Demo Completa)</span>
+                  </button>
+                  <p className="text-[11px] text-emerald-300/80 max-w-md">
+                    Experimente grátis todas as 5 gavetas, 10 instrumentos e Tela Cheia com
+                    &ldquo;Parabéns pra Você&rdquo; — sem precisar enviar arquivo.
+                  </p>
+                </div>
 
                 <div className="pt-1 flex flex-wrap items-center justify-center gap-2 text-[11px] text-zinc-400">
                   <span className="px-2.5 py-1 rounded-lg bg-studio-950 border border-zinc-800 font-mono text-zinc-300">
@@ -2651,6 +2781,10 @@ export default function RubsaxWorkspace() {
                     type="button"
                     disabled={isSvgLoading}
                     onClick={() => {
+                      if (isDemoScore && !copyrightAccepted) {
+                        handleStartOwnUploadFromDemo();
+                        return;
+                      }
                       if (!ensureCopyrightAccepted()) return;
                       fileInputRef.current?.click();
                     }}
@@ -2667,10 +2801,10 @@ export default function RubsaxWorkspace() {
                     <button
                       type="button"
                       onClick={handleCloseCurrentScore}
-                      className="w-full py-1.5 px-3 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 font-semibold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                      className="w-full py-2 px-3 rounded-xl bg-red-950/35 hover:bg-red-900/50 border border-red-500/35 text-xs text-red-200 flex items-center justify-center gap-1.5 font-bold active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
                     >
-                      <X className="w-3.5 h-3.5" />
-                      <span>Fechar partitura atual</span>
+                      <X className="w-3.5 h-3.5 text-red-400" />
+                      <span>Fechar / Tirar partitura da tela</span>
                     </button>
                   )}
                 </div>
@@ -4629,21 +4763,37 @@ export default function RubsaxWorkspace() {
                     </div>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!ensureCopyrightAccepted()) return;
-                      fileInputRef.current?.click();
-                    }}
-                    className={`inline-flex items-center gap-2 px-6 py-3 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
-                      copyrightAccepted
-                        ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
-                        : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600'
-                    }`}
-                  >
-                    <Upload className="w-4 h-4" />
-                    <span>Enviar Partitura (.mscz, .mscx, .xml, .mxl)</span>
-                  </button>
+                  <div className="flex flex-col items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!ensureCopyrightAccepted()) return;
+                        fileInputRef.current?.click();
+                      }}
+                      className={`inline-flex items-center gap-2 px-6 py-3 rounded-2xl font-extrabold text-sm shadow-xl active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation ${
+                        copyrightAccepted
+                          ? 'bg-gradient-to-r from-sax-500 to-sax-600 hover:from-sax-400 hover:to-sax-500 text-studio-950 shadow-sax-500/20'
+                          : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-600'
+                      }`}
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>Enviar Partitura (.mscz, .mscx, .xml, .mxl)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isLoadingDemo || isLoadingFile}
+                      onClick={() => void handleLoadOfficialDemo()}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/45 text-emerald-200 text-xs font-extrabold disabled:opacity-50 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+                    >
+                      {isLoadingDemo ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-300" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-300" />
+                      )}
+                      <span>Testar App com &ldquo;Parabéns pra Você&rdquo; (Demo Completa)</span>
+                    </button>
+                  </div>
                 </div>
 
                 {renderRecentProjectsSection()}
@@ -4663,6 +4813,8 @@ export default function RubsaxWorkspace() {
                 firstPartNoticeLabel={
                   analysis.staves[0]?.partSelectorLabel || analysis.detectedInstrumentName
                 }
+                isDemoScore={isDemoScore}
+                onUploadOwnScore={handleStartOwnUploadFromDemo}
                 canvasTheme={canvasTheme}
                 onThemeChange={setCanvasTheme}
                 viewMode={effectiveViewMode}
@@ -4729,6 +4881,7 @@ export default function RubsaxWorkspace() {
                 type="button"
                 onClick={() => {
                   setUserMenuOpen(false);
+                  setAccountModalInitialTab('account');
                   setAccountModalOpen(true);
                 }}
                 className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-zinc-800 text-zinc-100 font-bold flex items-center gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
@@ -4736,13 +4889,32 @@ export default function RubsaxWorkspace() {
                 <User className="w-4 h-4 text-sax-400" />
                 <span>Minha Conta</span>
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setUserMenuOpen(false);
+                  setAccountModalInitialTab('projects');
+                  setAccountModalOpen(true);
+                }}
+                className="w-full px-3.5 py-3 rounded-xl text-left hover:bg-zinc-800 text-zinc-100 font-bold flex items-center justify-between gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
+              >
+                <span className="inline-flex items-center gap-2.5">
+                  <FolderOpen className="w-4 h-4 text-sax-400" />
+                  <span>Meus Projetos</span>
+                </span>
+                {recentProjects.length > 0 && (
+                  <span className="px-2 py-0.5 rounded bg-zinc-800 text-[10px] font-mono text-sax-300">
+                    {recentProjects.length}/5
+                  </span>
+                )}
+              </button>
               <Link
                 href="/conta"
                 onClick={() => setUserMenuOpen(false)}
                 className="w-full px-3.5 py-3 rounded-xl hover:bg-zinc-800 text-zinc-200 font-semibold flex items-center gap-2.5 active:scale-[0.98] active:brightness-90 transition-all duration-75 touch-manipulation"
               >
                 <Crown className="w-4 h-4 text-sax-400" />
-                <span>Meu Plano &amp; Músicas Avulsas</span>
+                <span>Área do Cliente &amp; Planos</span>
               </Link>
               {isDev && (
                 <Link
@@ -4826,6 +4998,13 @@ export default function RubsaxWorkspace() {
         activeSingleUnlocks={activeSingleUnlocks}
         freePassSettings={appSettings.free_pass}
         freePassStatus={freePassStatus}
+        initialTab={accountModalInitialTab}
+        recentProjectsOverride={recentProjects}
+        onOpenRecentProject={(proj) => {
+          setAccountModalOpen(false);
+          void handleOpenRecentProject(proj);
+        }}
+        onRecentProjectsChanged={setRecentProjects}
         onOpenPlans={() => {
           setAccountModalOpen(false);
           openPlansModal('pro');
@@ -4988,6 +5167,79 @@ export default function RubsaxWorkspace() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE BLOQUEIO DO PDF APENAS NA PARTITURA DE DEMONSTRAÇÃO */}
+      {showDemoPdfBlockedModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn"
+          onClick={() => setShowDemoPdfBlockedModal(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl bg-studio-900 border-2 border-emerald-500/50 shadow-2xl overflow-hidden text-zinc-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 bg-gradient-to-r from-emerald-600/20 via-sax-500/10 to-transparent border-b border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-500/15 border border-emerald-500/35 text-emerald-400">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="inline-block text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 mb-0.5">
+                    Partitura Demo Interativa
+                  </span>
+                  <h3 className="text-base font-extrabold text-white">
+                    Exportar PDF bloqueado no teste
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDemoPdfBlockedModal(false)}
+                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                aria-label="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 text-xs sm:text-sm text-zinc-300 leading-relaxed space-y-3">
+              <p>
+                Na música demonstrativa <strong className="text-white">Parabéns pra Você</strong>,
+                você tem acesso total à visualização e às 5 gavetas de edição para testar o app
+                livremente.
+              </p>
+              <p className="text-zinc-400 text-xs">
+                Para gerar e baixar um arquivo PDF, envie a sua própria partitura (você poderá usar
+                inclusive seu <strong>Modo Gratuito</strong> ou planos PRO).
+              </p>
+            </div>
+
+            <div className="px-5 py-4 bg-studio-950 border-t border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDemoPdfBlockedModal(false)}
+                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold border border-zinc-700"
+              >
+                Continuar Testando
+              </button>
+              <Link
+                href="/planos"
+                className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-sax-300 text-xs font-bold border border-zinc-700 text-center"
+              >
+                Ver Planos
+              </Link>
+              <button
+                type="button"
+                onClick={handleStartOwnUploadFromDemo}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-[#D97706] hover:bg-sax-400 text-studio-950 text-xs font-extrabold shadow-lg shadow-sax-500/20"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Enviar Minha Partitura</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

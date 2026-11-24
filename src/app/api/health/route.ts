@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { ensureDemoCachePrewarmStarted } from '@/lib/server/demo-svg-cache';
 import {
   isSupabaseConfigured,
   supabaseAdminFetch,
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   const timestamp = new Date().toISOString();
+  ensureDemoCachePrewarmStarted();
 
   if (!isSupabaseConfigured()) {
     return NextResponse.json(

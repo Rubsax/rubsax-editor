@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveUserAccessSnapshot } from '@/lib/access';
+import { isOfficialDemoHash } from '@/lib/demo-score';
 import { checkFairUseLimit } from '@/lib/fair-use';
 import {
   ScoreTransformOptions,
@@ -118,6 +119,17 @@ export async function POST(req: NextRequest) {
       .createHash('sha256')
       .update(rawBuffer)
       .digest('hex');
+
+    if (isOfficialDemoHash(resolvedFileHash)) {
+      return NextResponse.json(
+        {
+          error:
+            'Na partitura de demonstração (Parabéns pra Você), todas as edições na tela são livres, mas a exportação em PDF fica bloqueada. Envie sua própria partitura para exportar o PDF!',
+          code: 'DEMO_PDF_BLOCKED',
+        },
+        { status: 403 }
+      );
+    }
 
     const user = await getServerSessionUser();
     const { access, settings } = await resolveUserAccessSnapshot(

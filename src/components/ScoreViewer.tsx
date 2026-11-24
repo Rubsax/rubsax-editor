@@ -21,6 +21,7 @@ import {
   Sparkles,
   LogIn,
   Crown,
+  Upload,
 } from 'lucide-react';
 
 export type CanvasThemeMode = 'parchment' | 'white';
@@ -59,6 +60,8 @@ interface ScoreViewerProps {
   onFreePassExpired?: () => void;
   onOpenPlansModal?: (reason?: 'fullscreen' | 'pro' | 'default') => void;
   onPreviewStateChange?: (state: { isPreview: boolean; totalPages: number }) => void;
+  isDemoScore?: boolean;
+  onUploadOwnScore?: () => void;
 }
 
 interface DragState {
@@ -101,6 +104,8 @@ export default function ScoreViewer({
   onFreePassExpired,
   onOpenPlansModal,
   onPreviewStateChange,
+  isDemoScore = false,
+  onUploadOwnScore,
 }: ScoreViewerProps) {
   const [svgPages, setSvgPages] = useState<string[]>([]);
   const [svgLoading, setSvgLoading] = useState<boolean>(false);
@@ -411,9 +416,9 @@ export default function ScoreViewer({
   const isSwitchingToPortrait = svgLoading && activeActionId === 'view-portrait';
   const isSwitchingToFullScore = svgLoading && activeActionId === 'view-full-score';
   const isFullscreenLocked =
-    isPreview || accessLevel === 'preview' || accessLevel === 'free_pass';
+    !isDemoScore && (isPreview || accessLevel === 'preview' || accessLevel === 'free_pass');
   const isProToolbarLocked =
-    accessLevel === 'preview' || accessLevel === 'free_pass';
+    !isDemoScore && (accessLevel === 'preview' || accessLevel === 'free_pass');
 
   const loadingCopy =
     loadingReason === 'unlocking'
@@ -672,8 +677,33 @@ export default function ScoreViewer({
         </div>
       )}
 
+      {/* Tarja do Modo Demo Interativo ("Parabéns pra Você") */}
+      {!isFullscreen && isDemoScore && (
+        <div className="px-3 sm:px-4 py-2 bg-emerald-950/60 border-b border-emerald-500/35 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-emerald-100">
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span>
+              <strong>Modo Teste (&ldquo;Parabéns pra Você&rdquo;)</strong> — Todas as 5 gavetas,
+              10 partes e Tela Cheia liberadas na tela!{' '}
+              <span className="text-amber-300 font-semibold">(Exportar PDF bloqueado no teste)</span>
+            </span>
+          </div>
+          {onUploadOwnScore && (
+            <button
+              type="button"
+              onClick={onUploadOwnScore}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#D97706] hover:bg-sax-400 text-studio-950 text-[11px] font-extrabold shrink-0 active:scale-[0.97] active:brightness-90 transition-all duration-75 touch-manipulation"
+            >
+              <Upload className="w-3 h-3" />
+              <span>Enviar Minha Partitura</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Tarja de Passe Gratuito Ativo no Topo do Visor */}
       {!isFullscreen &&
+        !isDemoScore &&
         accessLevel === 'free_pass' &&
         freePassStatus?.activeUnlock?.expiresAt && (
           <div className="px-3 sm:px-4 py-2 bg-emerald-950/65 border-b border-emerald-500/35 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -700,6 +730,7 @@ export default function ScoreViewer({
 
       {/* Visor discreto de Aviso de Pautas Ocultas (exclusivo Visitante e Modo Gratuito) */}
       {!isFullscreen &&
+        !isDemoScore &&
         (accessLevel === 'preview' || accessLevel === 'free_pass') &&
         totalPartsCount > 1 && (
           <div className="px-3 sm:px-4 py-2 bg-amber-950/45 border-b border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-100">

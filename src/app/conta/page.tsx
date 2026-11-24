@@ -26,6 +26,7 @@ export default function ContaPage() {
   const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
   const [plansModalOpen, setPlansModalOpen] = useState<boolean>(false);
   const [initialPlan, setInitialPlan] = useState<PlanCheckoutKind | null>(null);
+  const [initialAccountTab, setInitialAccountTab] = useState<'account' | 'projects'>('account');
   const [returnBanner, setReturnBanner] = useState<string | null>(null);
 
   const loadAccount = useCallback(async () => {
@@ -36,6 +37,9 @@ export default function ContaPage() {
     const syncReturnAndLoad = async () => {
       try {
         const params = new URLSearchParams(window.location.search);
+        if (params.get('aba') === 'projetos') {
+          setInitialAccountTab('projects');
+        }
         if (params.get('assinatura') === 'processando') {
           setSyncingReturn(true);
           setReturnBanner('Verificando confirmação da sua assinatura junto ao Mercado Pago...');
@@ -138,6 +142,7 @@ export default function ContaPage() {
               activeSingleUnlocks={activeUnlocks}
               freePassSettings={appSettings.free_pass}
               freePassStatus={freePassStatus}
+              initialTab={initialAccountTab}
               onOpenPlans={() => setPlansModalOpen(true)}
               onFreePassExpired={() => void loadAccount()}
               onSignOut={async () => {

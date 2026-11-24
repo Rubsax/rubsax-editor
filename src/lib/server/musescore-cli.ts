@@ -102,7 +102,7 @@ async function executeMuseScoreCommand(
 async function withTempMuseScoreDir<T>(
   prefix: (typeof TEMP_DIR_PREFIXES)[number],
   fn: (tempDir: string) => Promise<T>,
-  options?: { isDev?: boolean }
+  options?: { isDev?: boolean; isDemo?: boolean }
 ): Promise<T> {
   return enqueueMuseScoreTask(
     async () => {
@@ -118,13 +118,13 @@ async function withTempMuseScoreDir<T>(
         await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
       }
     },
-    { isDev: Boolean(options?.isDev) }
+    { isDev: Boolean(options?.isDev), isDemo: Boolean(options?.isDemo) }
   );
 }
 
 export async function runMuseScoreHeadlessPdf(
   msczBuffer: Buffer,
-  options?: { isDev?: boolean }
+  options?: { isDev?: boolean; isDemo?: boolean }
 ): Promise<Buffer> {
   return withTempMuseScoreDir(
     'rubsax_pdf_',
@@ -143,7 +143,7 @@ export async function runMuseScoreHeadlessPdf(
 
 export async function runMuseScoreHeadlessSvgPages(
   msczBuffer: Buffer,
-  options?: { isDev?: boolean }
+  options?: { isDev?: boolean; isDemo?: boolean }
 ): Promise<string[]> {
   return withTempMuseScoreDir(
     'rubsax_svg_',

@@ -10,6 +10,7 @@ const MAX_PENDING_JOBS = 18;
 
 interface QueuedTask<T = unknown> {
   isDev: boolean;
+  isDemo: boolean;
   fn: () => Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
@@ -17,6 +18,7 @@ interface QueuedTask<T = unknown> {
 
 const devQueue: QueuedTask[] = [];
 const normalQueue: QueuedTask[] = [];
+const demoQueue: QueuedTask[] = [];
 let activeRunners = 0;
 let lastMaxConcurrency = 1;
 let lastTmpCleanupMinutes = 15;
@@ -102,8 +104,8 @@ export async function getMuseScoreQueueStats(): Promise<MuseScoreQueueStats> {
 
 function drainQueue(maxConcurrency: number): void {
   while (activeRunners < maxConcurrency) {
-    // Fura-fila exclusivo: tarefas do Modo Dev têm prioridade absoluta sobre a fila normal
-    const nextTask = devQueue.shift() || normalQueue.shift();
+    // Prioridade estrita: Modo Dev -> clientes reais -> pré-aquecimento/Demo inédito
+    const nextTask = devQueue.shift() || normalQueue.shift() || demoQueue.shift();
     if (!nextTask) break;
 
     activeRunners += 1;
@@ -122,11 +124,21 @@ function drainQueue(maxConcurrency: number): void {
   }
 }
 
+export function isMuseScoreQueueIdle(): boolean {
+  return (
+    activeRunners === 0 &&
+    devQueue.length === 0 &&
+    normalQueue.length === 0 &&
+    demoQueue.length === 0
+  );
+}
+
 export async function enqueueMuseScoreTask<T>(
   fn: () => Promise<T>,
-  options?: { isDev?: boolean }
+  options?: { isDev?: boolean; isDemo?: boolean }
 ): Promise<T> {
   const isDev = Boolean(options?.isDev);
+  const isDemo = Boolean(options?.isDemo);
 
   try {
     const settings = await getAppSettings();
@@ -137,7 +149,7 @@ export async function enqueueMuseScoreTask<T>(
     lastTmpCleanupMinutes = 15;
   }
 
-  if (!isDev && devQueue.length + normalQueue.length >= MAX_PENDING_JOBS) {
+  if (!isDev && devQueue.length + normalQueue.length + demoQueue.length >= MAX_PENDING_JOBS) {
     throw new Error(
       'Servidor ocupado processando outras partituras no momento. Aguarde alguns segundos e tente novamente.'
     );
@@ -146,6 +158,7 @@ export async function enqueueMuseScoreTask<T>(
   return new Promise<T>((resolve, reject) => {
     const task: QueuedTask<T> = {
       isDev,
+      isDemo,
       fn,
       resolve,
       reject,
@@ -153,6 +166,8 @@ export async function enqueueMuseScoreTask<T>(
 
     if (isDev) {
       devQueue.push(task as QueuedTask);
+    } else if (isDemo) {
+      demoQueue.push(task as QueuedTask);
     } else {
       normalQueue.push(task as QueuedTask);
     }

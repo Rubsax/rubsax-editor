@@ -5,13 +5,16 @@ import type { FreePassStatus } from '@/lib/access';
 import { DEFAULT_APP_SETTINGS, type FreePassSettings } from '@/lib/settings';
 import type { SingleUnlockRow, SubscriptionRow } from '@/lib/supabase/admin';
 import type { ClientAuthUser } from '@/lib/supabase/client';
+import type { SavedWorkspaceSession } from '@/lib/workspace-storage';
 import FreePassCountdown from './FreePassCountdown';
+import RecentProjectsPanel from './RecentProjectsPanel';
 import {
   AlertTriangle,
   Ban,
   CheckCircle2,
   Clock,
   Crown,
+  FolderOpen,
   Loader2,
   LogOut,
   QrCode,
@@ -31,6 +34,10 @@ interface AccountModalProps {
   activeSingleUnlocks: SingleUnlockRow[];
   freePassSettings?: FreePassSettings;
   freePassStatus?: FreePassStatus | null;
+  initialTab?: 'account' | 'projects';
+  recentProjectsOverride?: SavedWorkspaceSession[];
+  onOpenRecentProject?: (proj: SavedWorkspaceSession) => void;
+  onRecentProjectsChanged?: (updated: SavedWorkspaceSession[]) => void;
   onOpenPlans?: () => void;
   onFreePassExpired?: () => void;
   onSignOut: () => Promise<void>;
@@ -57,6 +64,10 @@ export function AccountPanelContent({
   activeSingleUnlocks,
   freePassSettings,
   freePassStatus,
+  initialTab = 'account',
+  recentProjectsOverride,
+  onOpenRecentProject,
+  onRecentProjectsChanged,
   onOpenPlans,
   onFreePassExpired,
   onSignOut,
@@ -65,6 +76,7 @@ export function AccountPanelContent({
   onRenewMonthlyPix,
 }: Omit<AccountModalProps, 'open' | 'onClose'>) {
   const effectiveFreePass = freePassSettings || DEFAULT_APP_SETTINGS.free_pass;
+  const [activeTab, setActiveTab] = useState<'account' | 'projects'>(initialTab);
   const [confirmCancelSub, setConfirmCancelSub] = useState<boolean>(false);
   const [cancellingSub, setCancellingSub] = useState<boolean>(false);
   const [cancelMsg, setCancelMsg] = useState<string | null>(null);
@@ -74,6 +86,10 @@ export function AccountPanelContent({
   const [deleting, setDeleting] = useState<boolean>(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    setActiveTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     const tick = () => setNowMs(Date.now());
@@ -169,6 +185,53 @@ export function AccountPanelContent({
         </button>
       </div>
 
+      {/* Abas da Área do Cliente: Plano & Conta vs. Meus Projetos */}
+      <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-studio-950 border border-zinc-800">
+        <button
+          type="button"
+          onClick={() => setActiveTab('account')}
+          className={`py-2 px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all duration-75 touch-manipulation ${
+            activeTab === 'account'
+              ? 'bg-[#D97706] text-studio-950 shadow-sm'
+              : 'text-zinc-300 hover:bg-zinc-900'
+          }`}
+        >
+          <Crown className="w-3.5 h-3.5" />
+          <span>Meu Plano &amp; Conta</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('projects')}
+          className={`py-2 px-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all duration-75 touch-manipulation ${
+            activeTab === 'projects'
+              ? 'bg-[#D97706] text-studio-950 shadow-sm'
+              : 'text-zinc-300 hover:bg-zinc-900'
+          }`}
+        >
+          <FolderOpen className="w-3.5 h-3.5" />
+          <span>Meus Projetos</span>
+          {recentProjectsOverride && recentProjectsOverride.length > 0 && (
+            <span
+              className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono ${
+                activeTab === 'projects'
+                  ? 'bg-black/20 text-studio-950'
+                  : 'bg-zinc-800 text-sax-300'
+              }`}
+            >
+              {recentProjectsOverride.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {activeTab === 'projects' ? (
+        <RecentProjectsPanel
+          projectsOverride={recentProjectsOverride}
+          onOpenProject={onOpenRecentProject}
+          onProjectsChanged={onRecentProjectsChanged}
+        />
+      ) : (
+        <>
       {/* Plano Atual */}
       <div className="p-4 rounded-2xl bg-studio-950 border border-zinc-800 space-y-3">
         <span className="text-[11px] font-extrabold uppercase tracking-wider text-sax-400">
@@ -462,6 +525,8 @@ export function AccountPanelContent({
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }
@@ -493,9 +558,9 @@ export default function AccountModal(props: AccountModalProps) {
               <User className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-extrabold text-white">Minha Conta</h3>
+              <h3 className="text-base font-extrabold text-white">Minha Conta &amp; Projetos</h3>
               <p className="text-[11px] text-zinc-400">
-                Gerencie seu plano, músicas avulsas e privacidade.
+                Gerencie seu plano, projetos salvos neste dispositivo e privacidade.
               </p>
             </div>
           </div>
@@ -517,6 +582,10 @@ export default function AccountModal(props: AccountModalProps) {
             activeSingleUnlocks={props.activeSingleUnlocks}
             freePassSettings={props.freePassSettings}
             freePassStatus={props.freePassStatus}
+            initialTab={props.initialTab}
+            recentProjectsOverride={props.recentProjectsOverride}
+            onOpenRecentProject={props.onOpenRecentProject}
+            onRecentProjectsChanged={props.onRecentProjectsChanged}
             onOpenPlans={props.onOpenPlans}
             onFreePassExpired={props.onFreePassExpired}
             onSignOut={props.onSignOut}
