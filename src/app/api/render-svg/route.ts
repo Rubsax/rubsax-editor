@@ -6,10 +6,7 @@ import {
   buildModifiedMsczBuffer,
   validateUploadFileName,
 } from '@/lib/music/mscz-engine';
-import {
-  ensureDemoCachePrewarmStarted,
-  getOrRenderDemoSvgPages,
-} from '@/lib/server/demo-svg-cache';
+import { getOrRenderDemoSvgPages } from '@/lib/server/demo-svg-cache';
 import { buildFreePassRestrictedMsczBuffer } from '@/lib/server/free-pass-transform';
 import { runMuseScoreHeadlessSvgPages } from '@/lib/server/musescore-cli';
 import { logUsage } from '@/lib/supabase/admin';
@@ -59,8 +56,6 @@ export async function POST(req: NextRequest) {
       .createHash('sha256')
       .update(rawBuffer)
       .digest('hex');
-
-    ensureDemoCachePrewarmStarted();
 
     const user = await getServerSessionUser();
     const { access, settings } = await resolveUserAccessSnapshot(
